@@ -61,6 +61,10 @@ DB_PASSWORD=<your_pg_password>
 - **Precomputed correlations** stored in `correlations` table — avoids recomputing on every Streamlit render
 - **Idempotent ETL** — all inserts use `ON CONFLICT DO NOTHING`; safe to re-run
 
+## Git Workflow
+
+Commit work regularly — after each meaningful change (completing a function, fixing a bug, reaching a working state). Use `git push origin main` to sync to GitHub.
+
 ## Non-obvious Gotchas
 
 - **yfinance column naming**: extract.py flattens multi-level column tuples to strings like `"Close AAPL"` (space-separated). transform.py splits on spaces to parse ticker and field. Any yfinance output format change breaks both files.
