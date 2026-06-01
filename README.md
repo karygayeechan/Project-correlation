@@ -30,14 +30,17 @@ Analyzes return correlations between tech stocks using a PostgreSQL database, au
 ```
 project_correlation/
 ├── db/
-│   └── schema.sql          # CREATE TABLE / CREATE INDEX (IF NOT EXISTS — idempotent)
+│   └── schema.sql              # CREATE TABLE / CREATE INDEX (IF NOT EXISTS — idempotent)
 ├── etl/
-│   ├── extract.py          # fetch raw OHLCV + metadata from yfinance
-│   ├── transform.py        # reshape wide→long; compute 1m/6m Pearson correlations
-│   └── load.py             # insert companies, prices, correlations; write etl_log row
+│   ├── extract.py              # fetch raw OHLCV + metadata from yfinance
+│   ├── transform.py            # reshape wide→long; compute 1m/6m Pearson correlations
+│   └── load.py                 # insert companies, prices, correlations; write etl_log row
+├── api/
+│   └── main.py                 # FastAPI backend — REST endpoints over the DB
 ├── app/
-│   ├── db.py               # read-only DB query layer used by the dashboard
-│   └── streamlit_app.py    # 8-tab Streamlit dashboard
+│   ├── db.py                   # read-only DB query layer (used by the API)
+│   ├── api_client.py           # HTTP client wrapping the API (used by Streamlit)
+│   └── streamlit_app.py        # 8-tab Streamlit dashboard
 └── README.md
 ```
 
@@ -105,14 +108,14 @@ Using `uv` (recommended):
 ```bash
 uv venv --python 3.11
 source .venv/bin/activate
-uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv
+uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx
 ```
 
 Using standard `pip`:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv
+pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx
 ```
 
 ### 4. Configure environment variables
@@ -138,11 +141,22 @@ psql -d postgres -f db/schema.sql
 python3 etl/load.py
 ```
 
-### 7. Launch the dashboard
+### 7. Start the API backend
+
+```bash
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Interactive docs available at **http://localhost:8000/docs** once running.
+
+### 8. Launch the dashboard
 
 ```bash
 streamlit run app/streamlit_app.py
 ```
+
+The dashboard calls the API at `http://localhost:8000` by default.
+Override with `API_URL=http://your-host:8000` if running on a different host.
 
 ---
 

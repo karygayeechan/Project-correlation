@@ -12,10 +12,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Allow importing etl modules from streamlit run context
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "etl"))
-import db
-from load import remove_ticker_from_db, run as etl_run
+import api_client as db
+from api_client import run_etl as etl_run, remove_ticker_from_db, add_ticker
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -507,10 +505,9 @@ with tab_manage:
         elif new_ticker in db_tickers:
             st.warning(f"{new_ticker} is already in the database.")
         else:
-            current = db.get_tickers()
-            with st.spinner(f"Fetching {new_ticker} and recomputing correlations for {current + [new_ticker]}..."):
+            with st.spinner(f"Fetching {new_ticker} and recomputing correlations..."):
                 try:
-                    etl_run(tickers=current + [new_ticker])
+                    add_ticker(new_ticker)
                     st.success(f"Added {new_ticker}.")
                     _clear_and_rerun()
                 except Exception as exc:
@@ -554,7 +551,7 @@ with tab_manage:
         else:
             with st.spinner(f"Running ETL for {', '.join(current)}..."):
                 try:
-                    etl_run(tickers=current)
+                    etl_run(tickers=current or None)
                     st.success("Refresh complete.")
                     _clear_and_rerun()
                 except Exception as exc:
