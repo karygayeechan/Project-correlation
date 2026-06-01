@@ -55,6 +55,8 @@ project_correlation/
 - [x] ETL logging — every pipeline run writes status, row counts, duration, and any error to `etl_log`
 - [x] Schema applied to PostgreSQL — all 5 tables and indexes created
 - [x] `app/db.py` — read-only query layer: tickers, stock prices, on-the-fly correlation matrices, rolling correlations, ETL log
+- [x] `api/main.py` — FastAPI backend with 9 REST endpoints (health, tickers CRUD, prices, correlations heatmap/rolling, ETL log/run); interactive docs at `/docs`
+- [x] `app/api_client.py` — httpx client wrapping the API; mirrors `db.py` signatures so Streamlit needs no DB access
 - [x] `app/streamlit_app.py` — full 8-tab dashboard (see Dashboard section below)
 - [x] Tickers finalized — NVDA, GOOGL, AVGO, ARM, TSM (AAPL replaced with NVDA)
 
@@ -168,3 +170,4 @@ Override with `API_URL=http://your-host:8000` if running on a different host.
 - **Correlations computed on-the-fly for the dashboard** — heatmap and rolling correlation tabs query `stock_prices` directly rather than the precomputed `correlations` table, enabling arbitrary end-date and window selection
 - **`adj_close` stored separately from `close`** — adjusted price accounts for splits/dividends and is used for return calculations; raw close reflects the actual traded price
 - **Dynamic ticker support** — `run(tickers=[...])` in `load.py` accepts any ticker list; the dashboard's Manage Tickers tab can add/remove tickers without touching code
+- **Three-tier architecture** — Streamlit (port 8501) → FastAPI (port 8000) → PostgreSQL (port 5432); `app/db.py` is used only by the API, never directly by the dashboard
