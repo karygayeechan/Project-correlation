@@ -46,6 +46,29 @@ project_correlation/
 
 ---
 
+## Running the Application
+
+Requires PostgreSQL running and ETL executed at least once (see Setup below).
+
+**Terminal 1 — API backend:**
+```bash
+source .venv/bin/activate
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Terminal 2 — Streamlit dashboard:**
+```bash
+source .venv/bin/activate
+streamlit run app/streamlit_app.py
+```
+
+| Service | URL |
+|---|---|
+| Dashboard | http://localhost:8501 |
+| API (interactive docs) | http://localhost:8000/docs |
+
+---
+
 ## What Is Done
 
 - [x] Database schema (`db/schema.sql`) — 5 tables, indexes, constraints, `IF NOT EXISTS` for safe re-runs
