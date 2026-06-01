@@ -4,16 +4,16 @@ Analyzes return correlations between tech stocks using a PostgreSQL database, au
 
 ## What This Project Does
 
-1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 tickers: AAPL, GOOGL, AVGO, ARM, TSM
+1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 tickers: NVDA, GOOGL, AVGO, ARM, TSM
 2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over 1-month and 6-month windows
 3. **Loads** everything into PostgreSQL
-4. **Visualizes** correlations in a Streamlit dashboard where users can adjust tickers, time periods, and date ranges
+4. **Visualizes** correlations in an 8-tab Streamlit dashboard with interactive controls, ticker management, and ETL logging
 
 ---
 
 ## Database Schema
 
-4 tables covering all required relationship types:
+5 tables covering all required relationship types:
 
 | Table | Relationship | Description |
 |---|---|---|
@@ -30,14 +30,14 @@ Analyzes return correlations between tech stocks using a PostgreSQL database, au
 ```
 project_correlation/
 ├── db/
-│   └── schema.sql          # all CREATE TABLE and CREATE INDEX statements
+│   └── schema.sql          # CREATE TABLE / CREATE INDEX (IF NOT EXISTS — idempotent)
 ├── etl/
-│   ├── extract.py          # fetch raw data from yfinance
-│   ├── transform.py        # reshape wide->long, compute correlations
-│   ├── load.py             # insert into PostgreSQL (TODO)
-│   └── logger.py           # ETL run logging (TODO)
+│   ├── extract.py          # fetch raw OHLCV + metadata from yfinance
+│   ├── transform.py        # reshape wide→long; compute 1m/6m Pearson correlations
+│   └── load.py             # insert companies, prices, correlations; write etl_log row
 ├── app/
-│   └── streamlit_app.py    # Streamlit dashboard (TODO)
+│   ├── db.py               # read-only DB query layer used by the dashboard
+│   └── streamlit_app.py    # 8-tab Streamlit dashboard
 └── README.md
 ```
 
@@ -45,17 +45,34 @@ project_correlation/
 
 ## What Is Done
 
-- [x] Database schema (`db/schema.sql`) with keys, indexes, constraints, normalization
-- [x] `etl/extract.py` - fetches 1 year of daily prices + company metadata from yfinance
-- [x] `etl/transform.py` - reshapes wide DataFrame to long format (one row per ticker per date)
+- [x] Database schema (`db/schema.sql`) — 5 tables, indexes, constraints, `IF NOT EXISTS` for safe re-runs
+- [x] `etl/extract.py` — fetches 1 year of daily prices + company metadata from yfinance
+- [x] `etl/transform.py` — reshapes wide DataFrame to long format; `compute_correlations()` produces 1m/6m Pearson pairs
+- [x] `etl/load.py` — inserts companies, company_details, stock_prices (`ON CONFLICT DO NOTHING`); upserts correlations (`ON CONFLICT DO UPDATE`); writes `etl_log` row on success or error; accepts dynamic ticker list
+- [x] ETL logging — every pipeline run writes status, row counts, duration, and any error to `etl_log`
+- [x] Schema applied to PostgreSQL — all 5 tables and indexes created
+- [x] `app/db.py` — read-only query layer: tickers, stock prices, on-the-fly correlation matrices, rolling correlations, ETL log
+- [x] `app/streamlit_app.py` — full 8-tab dashboard (see Dashboard section below)
+- [x] Tickers finalized — NVDA, GOOGL, AVGO, ARM, TSM (AAPL replaced with NVDA)
 
-## What Still Needs to Be Done
+---
 
-- [ ] `etl/load.py` - insert companies, company_details, stock_prices into Postgres; idempotent (ON CONFLICT DO NOTHING)
-- [ ] `etl/transform.py` - add `compute_correlations()` function (daily returns → pairwise Pearson correlation for `1m` and `6m` periods)
-- [ ] `etl/logger.py` - write ETL run metadata to `etl_log` table
-- [ ] Apply schema to Postgres (`psql -d postgres -f db/schema.sql`)
-- [ ] `app/streamlit_app.py` - dashboard with correlation heatmap/chart, period selector, ticker filter
+## Dashboard
+
+Launch with `streamlit run app/streamlit_app.py`. Opens at **http://localhost:8501**.
+
+The sidebar provides a global ticker multiselect and date range that feed all chart tabs.
+
+| Tab | Type | Description |
+|---|---|---|
+| **Correlation Heatmap** | Read | Pairwise Pearson r matrix computed from DB prices. Toggle tickers, period (1m/6m), and end date to explore historical correlation regimes. Ranked pairs table below the heatmap. |
+| **Rolling Correlation** | Read | Picks a ticker pair and rolling window (21/42/63/126 days). Plots how the correlation evolves over time — useful for spotting regime changes or event-driven decoupling. |
+| **Price & Returns** | Read | Normalized price (base = 100 at window start) and daily returns bar chart. Toggle between views or show both. |
+| **Pair Scatter** | Read | Daily return scatter for any two tickers with OLS trendline. Shows Pearson r, R², and beta. |
+| **Network Graph** | Read | Circular graph where edge thickness and color encode correlation strength (green = positive, red = negative). Threshold slider removes weak edges. |
+| **Volatility Tracker** | Read | Rolling annualized realized volatility (σ × √252) per ticker. Contextualizes correlations — high vol changes how co-movement translates to portfolio risk. |
+| **Manage Tickers** | Write | Add a ticker (triggers ETL for all current + new), remove a ticker (cascades deletes), or refresh all data. All operations update the DB and reload charts immediately. |
+| **ETL Log** | Read | Table of all pipeline runs — timestamp, status, tickers processed, rows inserted/skipped, duration, and error message if failed. Auto-refreshes after any write. |
 
 ---
 
@@ -98,19 +115,30 @@ source .venv/bin/activate
 pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv
 ```
 
-### 4. Apply the database schema
+### 4. Configure environment variables
+
+Create a `.env` file at the project root:
+```
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=postgres
+DB_USER=<your_pg_user>
+DB_PASSWORD=<your_pg_password>
+```
+
+### 5. Apply the database schema
 
 ```bash
 psql -d postgres -f db/schema.sql
 ```
 
-### 5. Run the ETL
+### 6. Run the ETL
 
 ```bash
 python3 etl/load.py
 ```
 
-### 6. Launch the dashboard
+### 7. Launch the dashboard
 
 ```bash
 streamlit run app/streamlit_app.py
@@ -120,7 +148,9 @@ streamlit run app/streamlit_app.py
 
 ## Key Design Decisions
 
-- **Surrogate keys** (`SERIAL`) used throughout -- ticker symbols can change (e.g. FB -> META), integer IDs never do
-- **Correlations are precomputed** and stored in the DB -- avoids recomputing on every Streamlit interaction
-- **ETL is idempotent** -- re-running will not duplicate data (`ON CONFLICT DO NOTHING`)
-- **`adj_close` stored separately from `close`** -- adjusted price accounts for splits/dividends and is used for return calculations; raw close reflects the actual traded price
+- **Surrogate keys** (`SERIAL`) — ticker symbols can change (e.g. FB → META); integer PKs are stable
+- **Correlations upserted, not inserted** — `ON CONFLICT DO UPDATE SET corr_value = ...` ensures every ETL run refreshes correlation values to the latest window
+- **Stock prices idempotent** — `ON CONFLICT DO NOTHING` on `(company_id, date)`; historical prices don't change
+- **Correlations computed on-the-fly for the dashboard** — heatmap and rolling correlation tabs query `stock_prices` directly rather than the precomputed `correlations` table, enabling arbitrary end-date and window selection
+- **`adj_close` stored separately from `close`** — adjusted price accounts for splits/dividends and is used for return calculations; raw close reflects the actual traded price
+- **Dynamic ticker support** — `run(tickers=[...])` in `load.py` accepts any ticker list; the dashboard's Manage Tickers tab can add/remove tickers without touching code
