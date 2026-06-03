@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock Correlation Pipeline</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 16px;
+    }
+
+    .slide {
+      width: 100%;
+      max-width: 1100px;
+      background: #1a1d2e;
+      border-radius: 16px;
+      border: 1px solid #2d3250;
+      overflow: hidden;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+    }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border-bottom: 1px solid #334155;
+      padding: 36px 48px 28px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .header-left h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(90deg, #60a5fa, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.2;
+    }
+
+    .header-left p {
+      margin-top: 8px;
+      color: #94a3b8;
+      font-size: 0.95rem;
+      max-width: 480px;
+      line-height: 1.6;
+    }
+
+    .tickers {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: flex-start;
+      padding-top: 4px;
+    }
+
+    .ticker-chip {
+      background: #1e3a5f;
+      border: 1px solid #3b82f6;
+      color: #93c5fd;
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 999px;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Body grid ── */
+    .body {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 0;
+    }
+
+    .col {
+      padding: 32px 36px;
+      border-right: 1px solid #2d3250;
+    }
+
+    .col:last-child { border-right: none; }
+
+    .col-title {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 20px;
+    }
+
+    /* ── Pipeline steps ── */
+    .pipeline {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .step-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.85rem;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .step-icon.extract { background: #1e3a5f; color: #60a5fa; }
+    .step-icon.transform { background: #2d1b4e; color: #a78bfa; }
+    .step-icon.load { background: #14362e; color: #34d399; }
+    .step-icon.viz { background: #3b1f1f; color: #f87171; }
+
+    .step-text strong {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #e2e8f0;
+      line-height: 1.3;
+    }
+
+    .step-text span {
+      font-size: 0.78rem;
+      color: #64748b;
+      line-height: 1.4;
+    }
+
+    .arrow {
+      text-align: center;
+      color: #334155;
+      font-size: 0.75rem;
+      padding: 2px 0;
+      margin-left: 44px;
+    }
+
+    /* ── Schema ── */
+    .schema {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .table-card {
+      background: #0f1117;
+      border: 1px solid #2d3250;
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+
+    .table-card .tname {
+      font-size: 0.78rem;
+      font-weight: 700;
+      font-family: "SF Mono", "Fira Code", monospace;
+      margin-bottom: 5px;
+    }
+
+    .table-card .tname.blue { color: #60a5fa; }
+    .table-card .tname.purple { color: #a78bfa; }
+    .table-card .tname.green { color: #34d399; }
+    .table-card .tname.orange { color: #fb923c; }
+
+    .table-card .fields {
+      font-size: 0.72rem;
+      color: #64748b;
+      font-family: "SF Mono", "Fira Code", monospace;
+      line-height: 1.7;
+    }
+
+    .table-card .fields .pk { color: #fbbf24; }
+    .table-card .fields .fk { color: #94a3b8; }
+
+    /* ── Status & Tech ── */
+    .status-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 0.8rem;
+    }
+
+    .badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      letter-spacing: 0.5px;
+      margin-top: 1px;
+    }
+
+    .badge.done { background: #14362e; color: #34d399; }
+    .badge.todo { background: #2d1b1b; color: #f87171; }
+
+    .status-item span { color: #94a3b8; line-height: 1.4; }
+
+    .tech-section { margin-top: 4px; }
+
+    .tech-title {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: #64748b;
+      margin-bottom: 10px;
+    }
+
+    .tech-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tech-pill {
+      font-size: 0.73rem;
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-weight: 500;
+    }
+
+    .tech-pill.py   { background: #1e3a5f; color: #93c5fd; border: 1px solid #3b82f680; }
+    .tech-pill.db   { background: #14362e; color: #6ee7b7; border: 1px solid #10b98180; }
+    .tech-pill.api  { background: #2d1b4e; color: #c4b5fd; border: 1px solid #8b5cf680; }
+    .tech-pill.viz  { background: #3b2a14; color: #fcd34d; border: 1px solid #f59e0b80; }
+
+    /* ── Footer ── */
+    .footer {
+      border-top: 1px solid #2d3250;
+      background: #0f1117;
+      padding: 14px 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .footer-note {
+      font-size: 0.75rem;
+      color: #475569;
+    }
+
+    .footer-note code {
+      font-family: "SF Mono", "Fira Code", monospace;
+      background: #1a1d2e;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #94a3b8;
+    }
+
+    .design-pills {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .design-pill {
+      font-size: 0.68rem;
+      background: #1a2535;
+      border: 1px solid #334155;
+      color: #64748b;
+      padding: 3px 10px;
+      border-radius: 999px;
+    }
+
+    /* ── Purpose block ── */
+    .purpose-row {
+      margin-top: 18px;
+      display: flex;
+      align-items: stretch;
+      gap: 16px;
+    }
+
+    .purpose {
+      padding: 14px 18px;
+      background: rgba(96, 165, 250, 0.05);
+      border-left: 2px solid #3b82f6;
+      border-radius: 0 8px 8px 0;
+      flex: 1;
+    }
+
+    .purpose-label {
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: #60a5fa;
+      margin-bottom: 8px;
+    }
+
+    .purpose-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .purpose-list li {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      line-height: 1.5;
+      padding-left: 14px;
+      position: relative;
+    }
+
+    .purpose-list li::before {
+      content: "–";
+      position: absolute;
+      left: 0;
+      color: #3b82f6;
+      font-weight: 600;
+    }
+
+    /* ── Pair chart ── */
+    .pair-chart {
+      flex-shrink: 0;
+      background: rgba(15, 17, 23, 0.6);
+      border: 1px solid #2d3250;
+      border-radius: 8px;
+      padding: 10px 12px 6px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .pair-chart-title {
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: #475569;
+      align-self: flex-start;
+    }
+
+    .pair-chart-legend {
+      display: flex;
+      gap: 12px;
+      align-self: flex-end;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.62rem;
+      color: #64748b;
+    }
+
+    .legend-dot {
+      width: 16px;
+      height: 2px;
+      border-radius: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div class="slide">
+
+    <!-- Header -->
+    <div class="header">
+      <div class="header-left">
+        <h1>Stock Correlation Project</h1>
+        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations over 1-month and 6-month windows, persists results in PostgreSQL, surfaces them via an interactive Streamlit dashboard, and generates AI-powered regime commentary via Claude.</p>
+        <div class="purpose-row">
+          <div class="purpose">
+            <div class="purpose-label">Purpose of the Analysis</div>
+            <ul class="purpose-list">
+              <li>Identify correlation patterns in strongly correlated stocks and their potential implications in pair trading strategies</li>
+              <li>Identify potential regime changes versus temporary market effects driving co-movement</li>
+              <li>Identify the need for diversification across stocks exhibiting strong volatile returns</li>
+            </ul>
+          </div>
+          <div class="pair-chart">
+            <div class="pair-chart-title">Pair Trading Signal</div>
+            <svg viewBox="0 0 270 128" xmlns="http://www.w3.org/2000/svg" width="270" height="128">
+              <!-- Subtle grid lines -->
+              <line x1="15" y1="35" x2="258" y2="35" stroke="#1e293b" stroke-width="0.8"/>
+              <line x1="15" y1="60" x2="258" y2="60" stroke="#1e293b" stroke-width="0.8"/>
+              <line x1="15" y1="85" x2="258" y2="85" stroke="#1e293b" stroke-width="0.8"/>
+              <line x1="15" y1="108" x2="258" y2="108" stroke="#1e293b" stroke-width="0.8"/>
+
+              <!-- Spread fill (between lines in divergence zone) -->
+              <polygon
+                points="98,66 130,54 160,47 192,49 222,44 238,43  238,55 222,63 192,81 160,91 130,83 98,79"
+                fill="#7c3aed" fill-opacity="0.15"/>
+
+              <!-- Entry dashed line -->
+              <line x1="98" y1="22" x2="98" y2="112" stroke="#fbbf24" stroke-width="1" stroke-dasharray="3,3" opacity="0.7"/>
+              <!-- Exit dashed line -->
+              <line x1="238" y1="22" x2="238" y2="112" stroke="#34d399" stroke-width="1" stroke-dasharray="3,3" opacity="0.7"/>
+
+              <!-- Stock A line (blue) -->
+              <polyline
+                points="15,104 45,93 75,81 98,66 130,54 160,47 192,49 222,44 258,40"
+                fill="none" stroke="#60a5fa" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+
+              <!-- Stock B line (purple) -->
+              <polyline
+                points="15,107 45,97 75,84 98,79 130,83 160,91 192,81 222,63 258,43"
+                fill="none" stroke="#a78bfa" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+
+              <!-- Entry markers -->
+              <circle cx="98" cy="66" r="3.5" fill="#fbbf24" stroke="#0f1117" stroke-width="1.5"/>
+              <circle cx="98" cy="79" r="3.5" fill="#fbbf24" stroke="#0f1117" stroke-width="1.5"/>
+
+              <!-- Exit markers -->
+              <circle cx="238" cy="43" r="3.5" fill="#34d399" stroke="#0f1117" stroke-width="1.5"/>
+              <circle cx="238" cy="55" r="3.5" fill="#34d399" stroke="#0f1117" stroke-width="1.5"/>
+
+              <!-- "spread widens" label -->
+              <text x="168" y="71" text-anchor="middle" font-size="7" fill="#a78bfa" font-family="-apple-system,sans-serif" opacity="0.8" font-style="italic">spread</text>
+
+              <!-- Entry / Exit labels -->
+              <text x="98" y="121" text-anchor="middle" font-size="7.5" fill="#fbbf24" font-family="-apple-system,sans-serif" font-weight="600">Entry</text>
+              <text x="238" y="121" text-anchor="middle" font-size="7.5" fill="#34d399" font-family="-apple-system,sans-serif" font-weight="600">Exit</text>
+
+              <!-- Stock labels on right -->
+              <text x="261" y="43" font-size="8" fill="#60a5fa" font-family="-apple-system,sans-serif" font-weight="700">A</text>
+              <text x="261" y="47" font-size="8" fill="#a78bfa" font-family="-apple-system,sans-serif" font-weight="700" dy="8">B</text>
+            </svg>
+            <div class="pair-chart-legend">
+              <div class="legend-item"><div class="legend-dot" style="background:#60a5fa"></div>Stock A</div>
+              <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div>Stock B</div>
+              <div class="legend-item"><div class="legend-dot" style="background:#fbbf24;width:8px;height:8px;border-radius:50%"></div>Entry</div>
+              <div class="legend-item"><div class="legend-dot" style="background:#34d399;width:8px;height:8px;border-radius:50%"></div>Exit</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tickers">
+        <span class="ticker-chip">AAPL</span>
+        <span class="ticker-chip">GOOGL</span>
+        <span class="ticker-chip">AVGO</span>
+        <span class="ticker-chip">ARM</span>
+        <span class="ticker-chip">TSM</span>
+        <span class="ticker-chip">MSFT</span>
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div class="body">
+
+      <!-- Col 1: Pipeline -->
+      <div class="col">
+        <div class="col-title">ETL Pipeline</div>
+        <div class="pipeline">
+
+          <div class="step">
+            <div class="step-icon extract">&#8659;</div>
+            <div class="step-text">
+              <strong>Extract</strong>
+              <span>yfinance → 5-year daily OHLCV<br/>+ company metadata (sector, market cap)</span>
+            </div>
+          </div>
+          <div class="arrow">&#8595;</div>
+
+          <div class="step">
+            <div class="step-icon transform">&#8660;</div>
+            <div class="step-text">
+              <strong>Transform</strong>
+              <span>Wide → long reshape; compute daily returns; Pearson correlation (21 d / 126 d windows)</span>
+            </div>
+          </div>
+          <div class="arrow">&#8595;</div>
+
+          <div class="step">
+            <div class="step-icon load">&#8661;</div>
+            <div class="step-text">
+              <strong>Load</strong>
+              <span>Upsert into PostgreSQL with <code style="font-size:0.7rem;color:#94a3b8">ON CONFLICT DO NOTHING</code>; archive daily correlation snapshot; log run metadata</span>
+            </div>
+          </div>
+          <div class="arrow">&#8595;</div>
+
+          <div class="step">
+            <div class="step-icon" style="background:#1e3350;color:#f472b6">&#9733;</div>
+            <div class="step-text">
+              <strong>AI Agent</strong>
+              <span>Compare vs 30-day baseline; generate plain-English regime commentary via Claude (≤100 words)</span>
+            </div>
+          </div>
+          <div class="arrow">&#8595;</div>
+
+          <div class="step">
+            <div class="step-icon viz">&#9632;</div>
+            <div class="step-text">
+              <strong>Visualize</strong>
+              <span>FastAPI serves results; Streamlit renders 9-tab dashboard with heatmap, rolling corr &amp; regime alerts</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Col 2: Schema -->
+      <div class="col">
+        <div class="col-title">Database Schema</div>
+        <div class="schema">
+
+          <div class="table-card">
+            <div class="tname blue">companies</div>
+            <div class="fields">
+              <span class="pk">id</span> SERIAL PK &nbsp;·&nbsp; <span class="fk">symbol</span> UNIQUE
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="tname purple">company_details</div>
+            <div class="fields">
+              <span class="pk">id</span> FK(companies) &nbsp;·&nbsp; name<br/>sector &nbsp;·&nbsp; industry &nbsp;·&nbsp; market_cap
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="tname green">stock_prices</div>
+            <div class="fields">
+              <span class="pk">id</span> SERIAL PK &nbsp;·&nbsp; <span class="fk">company_id</span> FK<br/>
+              date &nbsp;·&nbsp; open/high/low/close<br/>adj_close &nbsp;·&nbsp; volume
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="tname orange">correlations</div>
+            <div class="fields">
+              <span class="fk">company_id_1, company_id_2</span> FK<br/>
+              period (1m | 6m) &nbsp;·&nbsp; corr_value<br/>calculated_at TIMESTAMP
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="tname" style="color:#f472b6">correlation_history</div>
+            <div class="fields">
+              <span class="fk">company_id_1, company_id_2</span> FK<br/>
+              period (1m | 6m) &nbsp;·&nbsp; corr_value<br/>snapshot_date DATE
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="tname" style="color:#fb923c">correlation_alerts</div>
+            <div class="fields">
+              corr_date &nbsp;·&nbsp; baseline_date<br/>commentary TEXT &nbsp;·&nbsp; generated_at
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="tname" style="color:#94a3b8">etl_log</div>
+            <div class="fields">
+              status &nbsp;·&nbsp; rows_inserted/skipped<br/>tickers &nbsp;·&nbsp; duration_sec &nbsp;·&nbsp; error_msg
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Col 3: Status + Tech -->
+      <div class="col">
+        <div class="col-title">Build Status</div>
+        <div class="status-list">
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>etl/extract.py — fetch OHLCV &amp; company info</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>etl/transform.py — reshape + 1m/6m Pearson correlations</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>db/schema.sql — 7 tables, indexes, constraints</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>etl/load.py — upsert prices, correlations, history &amp; etl_log</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>ETL logging — status, row counts, duration, errors</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>agent/commentary.py — AI regime commentary via Claude API</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>api/main.py — FastAPI with 11 REST endpoints</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>app/api_client.py — httpx client wrapping the API</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>Streamlit — 9-tab dashboard with ticker, date &amp; regime alerts</span>
+          </div>
+        </div>
+
+        <div class="tech-section">
+          <div class="tech-title">Stack</div>
+          <div class="tech-pills">
+            <span class="tech-pill py">Python 3.11</span>
+            <span class="tech-pill py">yfinance</span>
+            <span class="tech-pill py">pandas</span>
+            <span class="tech-pill db">PostgreSQL 16</span>
+            <span class="tech-pill db">psycopg2</span>
+            <span class="tech-pill api">FastAPI</span>
+            <span class="tech-pill api">Anthropic</span>
+            <span class="tech-pill viz">Streamlit</span>
+            <span class="tech-pill viz">Plotly</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <div class="footer-note">
+        Run: &nbsp;<code>python3 etl/load.py</code> &nbsp;·&nbsp; <code>uvicorn api.main:app</code> &nbsp;·&nbsp; <code>streamlit run app/streamlit_app.py</code>
+      </div>
+      <div class="design-pills">
+        <span class="design-pill">Surrogate SERIAL PKs</span>
+        <span class="design-pill">Precomputed correlations</span>
+        <span class="design-pill">Idempotent ETL</span>
+        <span class="design-pill">Three-tier architecture</span>
+        <span class="design-pill">30-day commentary baseline</span>
+        <span class="design-pill">DB-cached AI alerts</span>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>

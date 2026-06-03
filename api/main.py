@@ -13,6 +13,7 @@ from app import db
 from etl.load import remove_ticker_from_db
 from etl.load import run as etl_run
 from etl.load import get_connection, get_active_tickers_from_db
+from agent.commentary import generate_commentary
 
 # ─── App ─────────────────────────────────────────────────────────────────────
 
@@ -157,6 +158,58 @@ def get_rolling_corr(
         {"date": str(idx.date() if hasattr(idx, "date") else idx), "corr": round(float(val), 4)}
         for idx, val in series.items()
     ]
+
+# ─── Alerts ───────────────────────────────────────────────────────────────────
+
+@app.get("/alerts/generate", tags=["Alerts"])
+def get_or_generate_alert(end_date: date = Query(default=None)):
+    """
+    Return the stored alert for end_date if it exists, otherwise generate one.
+    Raises 404 if there is insufficient correlation history for that date.
+    """
+    if end_date is None:
+        end_date = date.today()
+
+    existing = db.get_alert_for_date(end_date)
+    if existing:
+        for col in ("generated_at", "corr_date", "baseline_date"):
+            if col in existing and existing[col] is not None:
+                existing[col] = str(existing[col])
+        return existing
+
+    result = generate_commentary(as_of_date=end_date)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Insufficient correlation history to generate an alert for {end_date}. "
+                   "Need a snapshot ≥ 30 days before that date.",
+        )
+    return result
+
+
+@app.get("/alerts", tags=["Alerts"])
+def get_alerts(
+    limit: int = Query(10, ge=1, le=100),
+    corr_date: date = Query(default=None),
+):
+    """Return recent alerts. Pass corr_date to filter to a specific date (fast, no generation)."""
+    if corr_date is not None:
+        row = db.get_alert_for_date(corr_date)
+        if row is None:
+            return []
+        for col in ("generated_at", "corr_date", "baseline_date"):
+            if col in row and row[col] is not None:
+                row[col] = str(row[col])
+        return [row]
+
+    df = db.get_alerts(limit)
+    if df.empty:
+        return []
+    for col in ("generated_at", "corr_date", "baseline_date"):
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+    df = df.where(df.notna(), None)
+    return df.to_dict(orient="records")
 
 # ─── ETL ──────────────────────────────────────────────────────────────────────
 

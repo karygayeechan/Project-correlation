@@ -89,6 +89,31 @@ def get_rolling_corr(sym1: str, sym2: str, start_date, end_date, window: int = 2
     return series
 
 
+def get_alert_for_date(end_date) -> dict | None:
+    """Fast DB read — returns stored alert for end_date, or None if not yet generated."""
+    records = _get("/alerts", corr_date=str(end_date)).json()
+    return records[0] if records else None
+
+
+def generate_alert_for_date(end_date) -> dict | None:
+    """Generate (or return cached) alert for end_date. May trigger a Claude API call."""
+    r = httpx.get(f"{API_URL}/alerts/generate", params={"end_date": str(end_date)}, timeout=TIMEOUT)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    return r.json()
+
+
+def get_alerts(limit: int = 10) -> pd.DataFrame:
+    records = _get("/alerts", limit=limit).json()
+    if not records:
+        return pd.DataFrame()
+    df = pd.DataFrame(records)
+    if "generated_at" in df.columns:
+        df["generated_at"] = pd.to_datetime(df["generated_at"])
+    return df
+
+
 def get_etl_log(limit: int = 50) -> pd.DataFrame:
     records = _get("/etl/log", limit=limit).json()
     if not records:

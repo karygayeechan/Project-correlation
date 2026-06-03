@@ -46,6 +46,16 @@ def _rolling_corr(sym1: str, sym2: str, start_date, end_date, window: int) -> pd
     return db.get_rolling_corr(sym1, sym2, start_date, end_date, window)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _alert_for_date(end_date) -> dict | None:
+    return db.get_alert_for_date(end_date)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _alerts(limit: int = 20) -> pd.DataFrame:
+    return db.get_alerts(limit)
+
+
 @st.cache_data(ttl=15, show_spinner=False)
 def _etl_log(limit: int = 50) -> pd.DataFrame:
     return db.get_etl_log(limit)
@@ -84,11 +94,13 @@ with st.sidebar:
 
     today = date.today()
     one_year_ago = today - timedelta(days=365)
+    five_years_ago = today - timedelta(days=365 * 5)
     date_range = st.date_input(
         "Date Range",
         value=(one_year_ago, today),
+        min_value=five_years_ago,
         max_value=today,
-        help="Global date window used by all charts.",
+        help="Global date window used by all charts. Up to 5 years of data available.",
     )
     if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
         start_date, end_date = date_range
@@ -106,6 +118,7 @@ with st.sidebar:
     tab_scatter,
     tab_network,
     tab_vol,
+    tab_alerts,
     tab_manage,
     tab_log,
 ) = st.tabs([
@@ -115,6 +128,7 @@ with st.sidebar:
     "Pair Scatter",
     "Network Graph",
     "Volatility",
+    "Regime Alerts",
     "Manage Tickers",
     "ETL Log",
 ])
@@ -124,27 +138,17 @@ with tab_heat:
     st.header("Correlation Heatmap")
     st.caption(
         "Pairwise Pearson correlation of daily returns, computed from DB prices. "
-        "Shift the end date to explore historical regimes."
+        "Use the sidebar date range to set the analysis window."
     )
 
     if len(selected) < 2:
         st.info("Select at least 2 tickers in the sidebar.")
     else:
-        ctrl1, ctrl2 = st.columns([1, 2])
-        with ctrl1:
-            period = st.radio("Period", ["1m", "6m"], horizontal=True, key="heat_period",
-                              help="1m = last 21 trading days, 6m = last 126")
-        with ctrl2:
-            heat_end = st.date_input(
-                "Analysis end date",
-                value=end_date,
-                max_value=today,
-                key="heat_end",
-                help="Slide back to compare correlation snapshots across time.",
-            )
+        period = st.radio("Period", ["1m", "6m"], horizontal=True, key="heat_period",
+                          help="1m = last 21 trading days, 6m = last 126")
 
         with st.spinner("Computing correlations..."):
-            corr_mat = _corr_heatmap(tuple(sorted(selected)), period, heat_end)
+            corr_mat = _corr_heatmap(tuple(sorted(selected)), period, end_date)
 
         if corr_mat.empty:
             st.info("Not enough price data for the selected parameters.")
@@ -171,7 +175,7 @@ with tab_heat:
                 colorbar=dict(title="r", tickvals=[-1, -0.5, 0, 0.5, 1]),
             ))
             fig.update_layout(
-                title=f"{period} Correlation — ending {heat_end}",
+                title=f"{period} Correlation — ending {end_date}",
                 height=480,
                 xaxis=dict(side="bottom"),
                 margin=dict(l=10, r=10, t=50, b=10),
@@ -235,7 +239,7 @@ with tab_roll:
                 fillcolor="rgba(33,150,243,0.10)",
             ))
             fig.update_layout(
-                title=f"Rolling {window_label} Correlation: {rc_sym1} vs {rc_sym2}",
+                title=f"Rolling {window_label} Correlation: {rc_sym1} vs {rc_sym2}  ({start_date} → {end_date})",
                 yaxis=dict(title="Pearson r", range=[-1.05, 1.05]),
                 xaxis=dict(title="Date"),
                 height=420,
@@ -472,7 +476,51 @@ with tab_vol:
                 vdf["Ann. Vol (%)"] = vdf["Ann. Vol (%)"].round(2)
                 st.dataframe(vdf, use_container_width=True, hide_index=True)
 
-# ─── Tab 7: Manage Tickers ────────────────────────────────────────────────────
+# ─── Tab 7: Regime Alerts ─────────────────────────────────────────────────────
+with tab_alerts:
+    st.header("Regime Alerts & Commentary")
+    st.caption(
+        "Compares correlations at the sidebar end date against a baseline ~30 days prior. "
+        "Requires ≥ 30 days of correlation history — sub-month comparisons are too noisy to interpret."
+    )
+
+    alert = _alert_for_date(end_date)
+
+    if alert and alert.get("commentary"):
+        al1, al2 = st.columns([3, 1])
+        with al1:
+            st.markdown(f"{alert['commentary']}")
+        with al2:
+            st.metric("Analysis date", str(alert["corr_date"]))
+            st.metric("Baseline date", str(alert["baseline_date"]))
+    else:
+        st.info(
+            f"No alert stored for **{end_date}**. "
+            "Click below to generate one — this calls Claude and takes a few seconds."
+        )
+        if st.button("Generate Alert for this date", type="primary", key="gen_alert_btn"):
+            with st.spinner("Analysing correlations via Claude..."):
+                try:
+                    result = db.generate_alert_for_date(end_date)
+                    if result:
+                        _clear_and_rerun()
+                    else:
+                        st.error(
+                            f"Not enough correlation history for {end_date}. "
+                            "Need a snapshot ≥ 30 days before that date in correlation_history."
+                        )
+                except Exception as exc:
+                    st.error(f"Generation failed: {exc}")
+
+    alerts_df = _alerts(20)
+    if not alerts_df.empty:
+        st.markdown("---")
+        st.subheader("Alert History")
+        history = alerts_df[["generated_at", "corr_date", "baseline_date", "commentary"]].copy()
+        history.columns = ["Generated At", "Analysis Date", "Baseline Date", "Commentary"]
+        st.dataframe(history, use_container_width=True, hide_index=True)
+
+# ─── Tab 8: Manage Tickers ───────────────────────────────────────────────────
 with tab_manage:
     st.header("Manage Tickers")
 

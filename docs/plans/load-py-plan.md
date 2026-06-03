@@ -1,75 +1,93 @@
-# Plan: Implement etl/load.py
+# Reference: etl/load.py Implementation
 
-## Context
+> **Status: Implemented.** This document describes the actual working implementation, updated from the original pre-build plan.
 
-`etl/load.py` is the final ETL stage and the main entry point (`python3 etl/load.py`). It orchestrates extract → transform → load, inserts all data into PostgreSQL, and writes an `etl_log` row on completion. `compute_correlations()` in `transform.py` must also be written since `load.py` depends on it.
+## Overview
 
----
-
-## Files to Modify / Create
-
-- **`etl/transform.py`** — add `compute_correlations(long_df)` function
-- **`etl/load.py`** — create from scratch
+`etl/load.py` is the main ETL entry point (`python3 etl/load.py`). It orchestrates extract → transform → load → archive → AI commentary. All inserts are idempotent via `ON CONFLICT DO NOTHING`.
 
 ---
 
-## Step 1: Add `compute_correlations()` to `etl/transform.py`
+## Files Modified
 
-**Input:** long-format DataFrame from `reshape()` with columns `date, open, high, low, close, adj_close, volume, symbol`
+- **`etl/transform.py`** — `compute_correlations(long_df)` added
+- **`etl/load.py`** — full implementation
+- **`agent/commentary.py`** — AI commentary agent (called from load.py)
+- **`etl/backfill_history.py`** — one-time script to backfill `correlation_history` from existing `stock_prices`
+
+---
+
+## sys.path Setup
+
+`load.py` needs to import from both `etl/` (siblings: `extract`, `transform`) and the project root (`agent.commentary`). It explicitly inserts both:
+
+```python
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)                     # etl/ — for extract, transform
+sys.path.insert(0, os.path.join(_HERE, "..")) # project root — for agent/
+```
+
+---
+
+## Step 1: `compute_correlations()` in `etl/transform.py`
+
+**Input:** long-format DataFrame from `reshape()` — columns `date, open, high, low, close, adj_close, volume, symbol`
 
 **Logic:**
 1. Sort by `date`
-2. Compute daily returns: `adj_close.pct_change()` per ticker group (`.groupby('symbol')`)
-3. Pivot to wide format: index=`date`, columns=`symbol`, values=`daily_return`
+2. Compute daily returns: `adj_close.pct_change()` per ticker via `.groupby('symbol')`
+3. Pivot to wide: index=`date`, columns=`symbol`, values=`daily_return`
 4. For each period `{'1m': 21, '6m': 126}`:
-   - Slice last N rows of the pivot table
-   - Call `.corr()` (Pearson, the default)
-   - Stack the correlation matrix → rows of `(symbol_1, symbol_2, corr_value)`
-   - Keep only unique pairs where `symbol_1 < symbol_2` (avoids duplicates; correlation is symmetric)
+   - Slice last N rows
+   - Call `.corr()` (Pearson)
+   - Stack → rows of `(symbol_1, symbol_2, corr_value)`
+   - Keep only pairs where `symbol_1 < symbol_2`
    - Add `period` column
-5. Concatenate both period DataFrames
+5. Concatenate both DataFrames
 
 **Returns:** DataFrame with columns `symbol_1, symbol_2, period, corr_value`
 
 ---
 
-## Step 2: Implement `etl/load.py`
+## Step 2: `etl/load.py` Functions
 
 ### DB connection
 
-Use `psycopg2` + `python-dotenv`. Load `.env` vars: `DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD`.
+```python
+def get_connection():
+    load_dotenv()
+    return psycopg2.connect(host, port, dbname, user, password)  # from .env
+```
 
-### Insertion order (FK dependency chain)
-
-1. `companies` → 2. `company_details` → 3. `stock_prices` → 4. `correlations` → 5. `etl_log`
-
-### Insert functions (all use `ON CONFLICT DO NOTHING`)
+### Insert functions (all `ON CONFLICT DO NOTHING`)
 
 **`insert_companies(cur, ticker_info) -> dict[str, int]`**
-- `INSERT INTO companies (symbol) VALUES (%s) ON CONFLICT DO NOTHING`
-- After inserts, `SELECT id, symbol FROM companies WHERE symbol = ANY(%s)` to get the id mapping
-- Returns `{symbol: company_id}` dict used by all subsequent inserts
+- Inserts symbols; SELECTs back `{symbol: id}` mapping used by all downstream inserts
 
 **`insert_company_details(cur, ticker_info, company_ids)`**
-- `INSERT INTO company_details (id, company_name, sector, industry, market_cap) VALUES ... ON CONFLICT DO NOTHING`
-- Maps symbol → company_id from the dict
+- Inserts name, sector, industry, market_cap keyed by company_id
 
 **`insert_stock_prices(cur, long_df, company_ids) -> int`**
-- Iterates rows (or uses `executemany`) to insert into `stock_prices`
 - `ON CONFLICT (company_id, date) DO NOTHING`
-- Returns count of rows inserted (`cur.rowcount` sum)
+- Returns row count
 
 **`insert_correlations(cur, corr_df, company_ids) -> int`**
-- Maps `symbol_1`/`symbol_2` → `company_id_1`/`company_id_2`
 - `ON CONFLICT (company_id_1, company_id_2, period) DO NOTHING`
-- Returns count of rows inserted
+- Returns row count
+
+**`archive_correlation_snapshot(cur, corr_df, company_ids)`** *(new)*
+- Inserts today's correlation values into `correlation_history` with `snapshot_date = date.today()`
+- `ON CONFLICT (company_id_1, company_id_2, period, snapshot_date) DO NOTHING`
+- Safe to re-run on the same day (idempotent)
 
 **`log_run(cur, status, rows_inserted, rows_skipped, tickers, duration_sec, error_msg=None)`**
-- `INSERT INTO etl_log (status, rows_inserted, rows_skipped, tickers, duration_sec, error_msg) VALUES (...)`
+- Inserts into `etl_log`
 
-### `run()` orchestrator
+---
 
-```
+## Step 3: `run()` Orchestrator
+
+```python
 start = time.time()
 try:
     raw_df      = fetch_raw()
@@ -84,35 +102,85 @@ try:
     insert_company_details(cur, ticker_info, company_ids)
     sp_count   = insert_stock_prices(cur, long_df, company_ids)
     corr_count = insert_correlations(cur, corr_df, company_ids)
-    conn.commit()
+    conn.commit()  # commit main data first
+
+    archive_correlation_snapshot(cur, corr_df, company_ids)
+    conn.commit()  # commit history snapshot
 
     log_run(cur, 'success', sp_count + corr_count, ..., tickers, duration)
     conn.commit()
+
+    # AI commentary — non-fatal; uses same open connection
+    try:
+        result = generate_commentary(conn)
+        if result:
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"  Commentary failed (non-fatal): {e}")
 
 except Exception as e:
     conn.rollback()
     log_run(cur, 'error', 0, 0, tickers, duration, str(e))
     conn.commit()
     raise
-
 finally:
     conn.close()
 ```
 
-### Imports
+### Key design decisions
 
-`load.py` runs as `python3 etl/load.py` from the project root, so Python adds `etl/` to `sys.path` automatically. Use bare imports: `from extract import fetch_raw, fetch_ticker_info` and `from transform import reshape, compute_correlations`.
+- **Commentary is non-fatal**: wrapped in its own try/except; ETL succeeds even if Claude API is unavailable
+- **Connection sharing**: `generate_commentary(conn)` receives the open connection so the caller controls commit/rollback; when `conn=None` the agent opens and commits its own connection
+- **30-day minimum rule**: commentary is skipped if no `correlation_history` snapshot exists ≥ 30 days before `as_of_date`
 
 ---
 
-## Verification
+## AI Commentary Agent: `agent/commentary.py`
 
-1. Run `python etl/extract.py` — smoke-test that yfinance data fetches cleanly
-2. Run `python etl/transform.py` — smoke-test reshape + correlations output shape
-3. Run `python3 etl/load.py` — full pipeline run
-4. Confirm in psql:
-   - `SELECT count(*) FROM companies;` → 5
-   - `SELECT count(*) FROM stock_prices;` → ~1260
-   - `SELECT count(*) FROM correlations;` → 20 (10 pairs × 2 periods)
-   - `SELECT * FROM etl_log ORDER BY run_at DESC LIMIT 1;` → status='success'
-5. Re-run `python3 etl/load.py` — row counts should stay the same (idempotent)
+```python
+BASELINE_DAYS = 30  # calendar days
+
+def generate_commentary(conn=None, as_of_date: date = None) -> dict | None:
+    # 1. Skip if ANTHROPIC_API_KEY not set
+    # 2. Find baseline snapshot ≥ 30 days before as_of_date
+    # 3. Fetch current + baseline rows from correlation_history
+    # 4. Build delta lines: sym1/sym2 (period): base → curr (Δ)
+    # 5. Call claude-sonnet-4-6, max_tokens=150
+    # 6. INSERT INTO correlation_alerts (corr_date, baseline_date, commentary)
+    # 7. Return {corr_date, baseline_date, commentary}
+```
+
+**Prompt structure:**
+- Under 100 words
+- Three sections: key changes (largest |Δ|), outliers, overall trend
+- No raw numbers quoted
+
+---
+
+## Backfill Script: `etl/backfill_history.py`
+
+One-time script to populate `correlation_history` from existing `stock_prices` data.
+
+```bash
+python etl/backfill_history.py --months 6 --interval 7
+```
+
+Generates weekly snapshots going back N months; skips dates already present (idempotent).
+
+**Run result:** 520 rows inserted (26 weekly snapshots: 2025-12-05 → 2026-06-03)
+
+---
+
+## Verification (current state)
+
+```sql
+SELECT count(*) FROM companies;          -- 6 (AAPL, GOOGL, AVGO, ARM, TSM, MSFT)
+SELECT count(*) FROM stock_prices;       -- 6,956 (~5y history, ON CONFLICT skips dupes)
+SELECT count(*) FROM correlations;       -- 30 (15 pairs × 2 periods)
+SELECT count(*) FROM correlation_history;-- 550 (backfill + ongoing ETL runs)
+SELECT count(*) FROM etl_log;            -- 9
+SELECT * FROM etl_log ORDER BY run_at DESC LIMIT 1;  -- status='success'
+```
+
+Re-running `python3 etl/load.py` is safe — all inserts are idempotent. Row counts stay the same except `etl_log` gains one row and `correlation_history` gains one row (today's snapshot, if not already present).

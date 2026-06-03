@@ -101,6 +101,36 @@ def get_rolling_corr(sym1: str, sym2: str, start_date, end_date, window: int = 2
     return rolling
 
 
+def get_alert_for_date(corr_date) -> dict | None:
+    """Return the stored alert for a specific corr_date, or None if not found."""
+    conn = get_connection()
+    try:
+        df = pd.read_sql(
+            "SELECT * FROM correlation_alerts WHERE corr_date = %s ORDER BY generated_at DESC LIMIT 1",
+            conn,
+            params=(corr_date,),
+        )
+        if df.empty:
+            return None
+        row = df.iloc[0]
+        return {k: (None if str(v) == "nan" else v) for k, v in row.to_dict().items()}
+    finally:
+        conn.close()
+
+
+def get_alerts(limit: int = 10) -> pd.DataFrame:
+    conn = get_connection()
+    try:
+        df = pd.read_sql(
+            "SELECT * FROM correlation_alerts ORDER BY generated_at DESC LIMIT %s",
+            conn,
+            params=(limit,),
+        )
+        return df
+    finally:
+        conn.close()
+
+
 def get_etl_log(limit: int = 50) -> pd.DataFrame:
     conn = get_connection()
     try:

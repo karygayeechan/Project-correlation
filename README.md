@@ -1,26 +1,29 @@
 # Stock Correlation Analysis
 
-Analyzes return correlations between tech stocks using a PostgreSQL database, automated ETL pipeline, and Streamlit dashboard.
+Analyzes return correlations between tech stocks using a PostgreSQL database, automated ETL pipeline, Streamlit dashboard, and an AI commentary agent.
 
 ## What This Project Does
 
 1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 tickers: NVDA, GOOGL, AVGO, ARM, TSM
 2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over 1-month and 6-month windows
 3. **Loads** everything into PostgreSQL
-4. **Visualizes** correlations in an 8-tab Streamlit dashboard with interactive controls, ticker management, and ETL logging
+4. **Visualizes** correlations in a 9-tab Streamlit dashboard with interactive controls, ticker management, and ETL logging
+5. **Generates AI commentary** — after each ETL run, an agent compares the latest correlations against a 30-day baseline and writes a plain-English regime summary via the Claude API
 
 ---
 
 ## Database Schema
 
-5 tables covering all required relationship types:
+7 tables covering all required relationship types:
 
 | Table | Relationship | Description |
 |---|---|---|
 | `companies` | parent | ticker symbol |
 | `company_details` | 1:1 with companies | name, sector, industry, market cap |
 | `stock_prices` | 1:N with companies | daily OHLCV + adjusted close |
-| `correlations` | self-join on companies | pairwise Pearson correlation by period |
+| `correlations` | self-join on companies | latest pairwise Pearson correlation by period (upserted each run) |
+| `correlation_history` | self-join on companies | timestamped snapshot of every ETL run's correlation values |
+| `correlation_alerts` | standalone | AI-generated plain-English commentary comparing current vs. baseline |
 | `etl_log` | standalone | one row per ETL run with status and row counts |
 
 ---
@@ -34,13 +37,17 @@ project_correlation/
 ├── etl/
 │   ├── extract.py              # fetch raw OHLCV + metadata from yfinance
 │   ├── transform.py            # reshape wide→long; compute 1m/6m Pearson correlations
-│   └── load.py                 # insert companies, prices, correlations; write etl_log row
+│   └── load.py                 # insert companies, prices, correlations; archive snapshot; run commentary agent
+├── agent/
+│   ├── __init__.py
+│   ├── commentary.py           # AI commentary agent — compares correlation snapshots, calls Claude API
+│   └── AGENT.md                # detailed breakdown of the agent implementation
 ├── api/
 │   └── main.py                 # FastAPI backend — REST endpoints over the DB
 ├── app/
 │   ├── db.py                   # read-only DB query layer (used by the API)
 │   ├── api_client.py           # HTTP client wrapping the API (used by Streamlit)
-│   └── streamlit_app.py        # 8-tab Streamlit dashboard
+│   └── streamlit_app.py        # 9-tab Streamlit dashboard
 └── README.md
 ```
 
@@ -71,17 +78,20 @@ streamlit run app/streamlit_app.py
 
 ## What Is Done
 
-- [x] Database schema (`db/schema.sql`) — 5 tables, indexes, constraints, `IF NOT EXISTS` for safe re-runs
+- [x] Database schema (`db/schema.sql`) — 7 tables, indexes, constraints, `IF NOT EXISTS` for safe re-runs
 - [x] `etl/extract.py` — fetches 1 year of daily prices + company metadata from yfinance
 - [x] `etl/transform.py` — reshapes wide DataFrame to long format; `compute_correlations()` produces 1m/6m Pearson pairs
-- [x] `etl/load.py` — inserts companies, company_details, stock_prices (`ON CONFLICT DO NOTHING`); upserts correlations (`ON CONFLICT DO UPDATE`); writes `etl_log` row on success or error; accepts dynamic ticker list
+- [x] `etl/load.py` — inserts companies, company_details, stock_prices (`ON CONFLICT DO NOTHING`); upserts correlations (`ON CONFLICT DO UPDATE`); archives snapshot to `correlation_history`; calls commentary agent; writes `etl_log` row on success or error; accepts dynamic ticker list
 - [x] ETL logging — every pipeline run writes status, row counts, duration, and any error to `etl_log`
-- [x] Schema applied to PostgreSQL — all 5 tables and indexes created
-- [x] `app/db.py` — read-only query layer: tickers, stock prices, on-the-fly correlation matrices, rolling correlations, ETL log
-- [x] `api/main.py` — FastAPI backend with 9 REST endpoints (health, tickers CRUD, prices, correlations heatmap/rolling, ETL log/run); interactive docs at `/docs`
+- [x] Schema applied to PostgreSQL — all 7 tables and indexes created
+- [x] `app/db.py` — read-only query layer: tickers, stock prices, on-the-fly correlation matrices, rolling correlations, alerts, ETL log
+- [x] `api/main.py` — FastAPI backend with 10 REST endpoints (health, tickers CRUD, prices, correlations heatmap/rolling, alerts, ETL log/run); interactive docs at `/docs`
 - [x] `app/api_client.py` — httpx client wrapping the API; mirrors `db.py` signatures so Streamlit needs no DB access
-- [x] `app/streamlit_app.py` — full 8-tab dashboard (see Dashboard section below)
+- [x] `app/streamlit_app.py` — full 9-tab dashboard (see Dashboard section below)
 - [x] Tickers finalized — NVDA, GOOGL, AVGO, ARM, TSM (AAPL replaced with NVDA)
+- [x] `agent/commentary.py` — AI commentary agent comparing monthly correlation snapshots via Claude API
+- [x] `correlation_history` table — accumulates one snapshot per ETL day per pair; enables 30-day delta comparisons
+- [x] `correlation_alerts` table — stores generated commentary with current and baseline dates
 
 ---
 
@@ -99,6 +109,7 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 | **Pair Scatter** | Read | Daily return scatter for any two tickers with OLS trendline. Shows Pearson r, R², and beta. |
 | **Network Graph** | Read | Circular graph where edge thickness and color encode correlation strength (green = positive, red = negative). Threshold slider removes weak edges. |
 | **Volatility Tracker** | Read | Rolling annualized realized volatility (σ × √252) per ticker. Contextualizes correlations — high vol changes how co-movement translates to portfolio risk. |
+| **Regime Alerts** | Read | Latest AI-generated commentary comparing correlations against a 30-day baseline. Only populated once ≥ 30 days of history exists. Full alert history table below the latest summary. |
 | **Manage Tickers** | Write | Add a ticker (triggers ETL for all current + new), remove a ticker (cascades deletes), or refresh all data. All operations update the DB and reload charts immediately. |
 | **ETL Log** | Read | Table of all pipeline runs — timestamp, status, tickers processed, rows inserted/skipped, duration, and error message if failed. Auto-refreshes after any write. |
 
@@ -111,6 +122,7 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 - Python 3.11.9
 - PostgreSQL 16
 - `uv` package manager (recommended) or `pip`
+- Anthropic API key (for the commentary agent — optional, ETL works without it)
 
 ### 1. Install PostgreSQL (macOS)
 
@@ -133,14 +145,14 @@ Using `uv` (recommended):
 ```bash
 uv venv --python 3.11
 source .venv/bin/activate
-uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx
+uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic
 ```
 
 Using standard `pip`:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx
+pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic
 ```
 
 ### 4. Configure environment variables
@@ -152,7 +164,10 @@ DB_PORT=5432
 DB_NAME=postgres
 DB_USER=<your_pg_user>
 DB_PASSWORD=<your_pg_password>
+ANTHROPIC_API_KEY=<your_api_key>
 ```
+
+`ANTHROPIC_API_KEY` is optional — the ETL and dashboard work without it. Regime alerts will simply be skipped until it is set.
 
 ### 5. Apply the database schema
 
@@ -194,3 +209,6 @@ Override with `API_URL=http://your-host:8000` if running on a different host.
 - **`adj_close` stored separately from `close`** — adjusted price accounts for splits/dividends and is used for return calculations; raw close reflects the actual traded price
 - **Dynamic ticker support** — `run(tickers=[...])` in `load.py` accepts any ticker list; the dashboard's Manage Tickers tab can add/remove tickers without touching code
 - **Three-tier architecture** — Streamlit (port 8501) → FastAPI (port 8000) → PostgreSQL (port 5432); `app/db.py` is used only by the API, never directly by the dashboard
+- **30-day minimum for commentary** — sub-month correlation comparisons are too noisy to interpret; the agent skips silently until a baseline snapshot ≥ 30 calendar days old exists in `correlation_history`
+- **Commentary failures are non-fatal** — if the Claude API call fails (network error, rate limit, missing key), the ETL rolls back only the alert INSERT and continues to completion; no price or correlation data is lost
+- **One snapshot per day** — `correlation_history` uses a `UNIQUE (company_id_1, company_id_2, period, snapshot_date)` constraint so re-running the ETL multiple times on the same day is idempotent

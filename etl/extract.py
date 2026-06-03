@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 
 TICKERS = ["NVDA", "GOOGL", "AVGO", "ARM", "TSM"]
-PERIOD = "1y"
+PERIOD = "5y"
 INTERVAL = "1d"
 
 
