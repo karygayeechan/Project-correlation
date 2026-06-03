@@ -161,6 +161,7 @@ def remove_ticker_from_db(symbol: str):
         if row is None:
             return
         cid = row[0]
+        cur.execute("DELETE FROM correlation_history WHERE company_id_1 = %s OR company_id_2 = %s", (cid, cid))
         cur.execute("DELETE FROM correlations WHERE company_id_1 = %s OR company_id_2 = %s", (cid, cid))
         cur.execute("DELETE FROM stock_prices WHERE company_id = %s", (cid,))
         cur.execute("DELETE FROM company_details WHERE id = %s", (cid,))
