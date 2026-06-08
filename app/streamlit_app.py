@@ -15,6 +15,13 @@ load_dotenv()
 import api_client as db
 from api_client import run_etl as etl_run, remove_ticker_from_db, add_ticker
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Cointegration test"))
+from cointegration import run_all as coint_run_all
+from conclusions import adf_conclusion, eg_conclusion, pair_conclusion
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Trading signals"))
+from trading_signals import fetch_prices as ts_fetch_prices, compute_rolling_signals, signal_translation
+
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Stock Correlation Dashboard",
@@ -114,23 +121,23 @@ with st.sidebar:
 (
     tab_heat,
     tab_roll,
-    tab_price,
-    tab_scatter,
+    tab_coint,
+    tab_signals,
+    tab_pnl,
     tab_network,
     tab_vol,
     tab_alerts,
     tab_manage,
-    tab_log,
 ) = st.tabs([
     "Correlation Heatmap",
     "Rolling Correlation",
-    "Price & Returns",
-    "Pair Scatter",
+    "Cointegration Test",
+    "Trading Signals",
+    "Daily PnL",
     "Network Graph",
     "Volatility",
     "Regime Alerts",
     "Manage Tickers",
-    "ETL Log",
 ])
 
 # ─── Tab 1: Correlation Heatmap ───────────────────────────────────────────────
@@ -206,10 +213,12 @@ with tab_roll:
     else:
         c1, c2, c3 = st.columns(3)
         with c1:
-            rc_sym1 = st.selectbox("Ticker 1", selected, key="rc_sym1")
+            rc_default_a = "AAPL" if "AAPL" in selected else selected[0]
+            rc_sym1 = st.selectbox("Ticker 1", selected, index=selected.index(rc_default_a), key="rc_sym1")
         with c2:
             other = [t for t in selected if t != rc_sym1]
-            rc_sym2 = st.selectbox("Ticker 2", other or selected, key="rc_sym2")
+            rc_default_b = "GOOGL" if "GOOGL" in other else other[0]
+            rc_sym2 = st.selectbox("Ticker 2", other or selected, index=(other or selected).index(rc_default_b) if rc_default_b in (other or selected) else 0, key="rc_sym2")
         with c3:
             window_label = st.selectbox(
                 "Window", ["1m (21d)", "2m (42d)", "3m (63d)", "6m (126d)"], key="rc_window"
@@ -254,117 +263,324 @@ with tab_roll:
             col_c.metric("Min r", f"{valid.min():.3f}")
             col_d.metric("Max r", f"{valid.max():.3f}")
 
-# ─── Tab 3: Price & Returns ───────────────────────────────────────────────────
-with tab_price:
-    st.header("Normalized Price & Daily Returns")
+# ─── Tab 3: Cointegration Test ───────────────────────────────────────────────
+with tab_coint:
+    st.header("Cointegration Test")
     st.caption(
-        "Price is indexed to 100 at the start of the window so tickers with different "
-        "price levels are directly comparable. Returns are daily % change of adjusted close."
+        "Tests whether two non-stationary price series share a stable long-run relationship. "
+        "Uses 5-year daily adj_close prices from the DB."
     )
 
-    if not selected:
-        st.info("Select tickers in the sidebar.")
-    else:
-        with st.spinner("Loading price data..."):
-            prices = _stock_prices(tuple(sorted(selected)), start_date, end_date)
+    db_tickers_coint = _tickers()
+    default_a = "NVDA" if "NVDA" in db_tickers_coint else db_tickers_coint[0]
+    default_b = "TSM" if "TSM" in db_tickers_coint else db_tickers_coint[1]
 
-        if prices.empty:
-            st.info("No price data for the selected range.")
-        else:
-            pivot = prices.pivot(index="date", columns="symbol", values="adj_close").dropna(how="all")
-            view = st.radio("Show", ["Normalized Price", "Daily Returns", "Both"], horizontal=True, key="price_view")
+    ca1, ca2 = st.columns(2)
+    with ca1:
+        coint_sym_a = st.selectbox("Stock A", db_tickers_coint, index=db_tickers_coint.index(default_a), key="coint_a")
+    with ca2:
+        other_tickers = [t for t in db_tickers_coint if t != coint_sym_a]
+        default_b_idx = other_tickers.index(default_b) if default_b in other_tickers else 0
+        coint_sym_b = st.selectbox("Stock B", other_tickers, index=default_b_idx, key="coint_b")
 
-            if view in ("Normalized Price", "Both"):
-                norm = pivot.div(pivot.bfill().iloc[0]) * 100
-                fig_n = px.line(
-                    norm.reset_index().melt(id_vars="date", var_name="Symbol", value_name="Index"),
-                    x="date", y="Index", color="Symbol",
-                    title="Normalized Price (base = 100 at window start)",
-                )
-                fig_n.add_hline(y=100, line_dash="dot", line_color="#aaa", line_width=1)
-                fig_n.update_layout(height=400, hovermode="x unified", margin=dict(t=50))
-                st.plotly_chart(fig_n, use_container_width=True)
+    run_coint = st.button("Run Cointegration Test", type="primary")
 
-            if view in ("Daily Returns", "Both"):
-                ret = (pivot.pct_change() * 100).reset_index().melt(
-                    id_vars="date", var_name="Symbol", value_name="Return (%)"
-                )
-                fig_r = px.bar(
-                    ret.dropna(),
-                    x="date", y="Return (%)", color="Symbol",
-                    barmode="group",
-                    title="Daily Returns (%)",
-                )
-                fig_r.update_layout(height=400, hovermode="x unified", margin=dict(t=50))
-                st.plotly_chart(fig_r, use_container_width=True)
+    if run_coint:
+        with st.spinner(f"Running tests for {coint_sym_a} / {coint_sym_b}…"):
+            try:
+                cr = coint_run_all(coint_sym_a, coint_sym_b)
+            except Exception as exc:
+                st.error(f"Test failed: {exc}")
+                cr = None
 
-# ─── Tab 4: Pair Scatter ─────────────────────────────────────────────────────
-with tab_scatter:
-    st.header("Pair Return Scatter")
-    st.caption(
-        "Each point is one trading day. The slope (beta) shows how much one ticker moves "
-        "per unit move of the other. Pearson r measures linear co-movement."
-    )
+        if cr:
+            st.markdown("---")
 
-    if len(selected) < 2:
-        st.info("Select at least 2 tickers in the sidebar.")
-    else:
-        sc1, sc2 = st.columns(2)
-        with sc1:
-            sc_sym1 = st.selectbox("Ticker 1", selected, key="sc_sym1")
-        with sc2:
-            sc_other = [t for t in selected if t != sc_sym1]
-            sc_sym2 = st.selectbox("Ticker 2", sc_other or selected, key="sc_sym2")
+            # ── Section 1: Individual ADF Tests ──────────────────────────────
+            st.subheader("Step 1 — ADF Test on Individual Price Series")
+            st.caption("Is each series non-stationary? (p > 0.05 → non-stationary ✓ → required for cointegration)")
 
-        with st.spinner("Loading pair data..."):
-            sc_prices = _stock_prices((sc_sym1, sc_sym2), start_date, end_date)
+            for adf_res in [cr["adf_a"], cr["adf_b"]]:
+                with st.container(border=True):
+                    st.markdown(f"**ADF Test: {adf_res['label']}**")
+                    am1, am2, am3, am4, am5 = st.columns(5)
+                    am1.metric("Test Statistic", f"{adf_res['stat']:.4f}")
+                    am2.metric("P-Value", f"{adf_res['p_value']:.4f}")
+                    am3.metric("Crit 1%", f"{adf_res['critical_values']['1%']:.4f}")
+                    am4.metric("Crit 5%", f"{adf_res['critical_values']['5%']:.4f}")
+                    am5.metric("Crit 10%", f"{adf_res['critical_values']['10%']:.4f}")
+                    verdict = adf_res["verdict"]
+                    conclusion = adf_conclusion(adf_res["is_stationary"])
+                    if adf_res["is_stationary"]:
+                        st.warning(f"{verdict} {conclusion}")
+                    else:
+                        st.success(f"{verdict} {conclusion}")
 
-        if sc_prices.empty:
-            st.info("No data available.")
-        else:
-            sc_pivot = sc_prices.pivot(index="date", columns="symbol", values="adj_close")
-            sc_ret = (sc_pivot.pct_change() * 100).dropna()
+            st.markdown("---")
 
-            if sc_sym1 not in sc_ret.columns or sc_sym2 not in sc_ret.columns:
-                st.info("Insufficient overlapping data.")
+            # ── Section 2: Engle-Granger ──────────────────────────────────────
+            st.subheader("Step 2 — Engle-Granger Test")
+            st.caption(
+                "Regress A on B, compute the spread (residuals), then run ADF on the spread. "
+                "If the spread is stationary (p < 0.05), the pair is cointegrated."
+            )
+
+            eg = cr["eg"]
+            bm1, bm2 = st.columns(2)
+            bm1.metric("Intercept α", f"{eg['alpha']:.4f}",
+                       help="Baseline gap between the two series; included in the spread formula ϵt = A − (α + β·B)")
+            bm2.metric("Hedge Ratio β", f"{eg['beta']:.4f}",
+                       help=f"1 unit of {coint_sym_a} ≈ {eg['beta']:.4f} units of {coint_sym_b}")
+
+            # Spread chart
+            spread = eg["residuals"]
+            spread_mean = spread.mean()
+            spread_std = spread.std()
+            fig_spread = go.Figure()
+            fig_spread.add_trace(go.Scatter(
+                x=spread.index, y=spread.values,
+                mode="lines", name="Spread", line=dict(color="#2196F3", width=1.5)
+            ))
+            fig_spread.add_hline(y=spread_mean, line=dict(color="gray", dash="dash"), annotation_text="Mean")
+            fig_spread.add_hline(y=spread_mean + spread_std, line=dict(color="#e53935", dash="dot", width=1), annotation_text="+1σ")
+            fig_spread.add_hline(y=spread_mean - spread_std, line=dict(color="#e53935", dash="dot", width=1), annotation_text="-1σ")
+            fig_spread.update_layout(
+                title=f"Spread: {coint_sym_a} − β·{coint_sym_b}",
+                xaxis_title="Date", yaxis_title="Spread",
+                height=350, margin=dict(t=50),
+            )
+            st.plotly_chart(fig_spread, use_container_width=True)
+
+            with st.container(border=True):
+                st.markdown(f"**ADF Test on Spread (residuals)**")
+                em1, em2, em3, em4, em5 = st.columns(5)
+                em1.metric("Test Statistic", f"{eg['stat']:.4f}")
+                em2.metric("P-Value", f"{eg['p_value']:.4f}")
+                em3.metric("Crit 1%", f"{eg['critical_values']['1%']:.4f}")
+                em4.metric("Crit 5%", f"{eg['critical_values']['5%']:.4f}")
+                em5.metric("Crit 10%", f"{eg['critical_values']['10%']:.4f}")
+                eg_conc = eg_conclusion(eg["is_cointegrated"])
+                if eg["is_cointegrated"]:
+                    st.success(f"{eg['verdict']} {eg_conc}")
+                else:
+                    st.error(f"{eg['verdict']} {eg_conc}")
+
+            st.markdown("---")
+
+            # ── Section 3: Final Verdict ──────────────────────────────────────
+            st.subheader("Final Verdict")
+            criteria = [
+                (f"ADF on {coint_sym_a}: p > 0.05 (non-stationary)", not cr["adf_a"]["is_stationary"]),
+                (f"ADF on {coint_sym_b}: p > 0.05 (non-stationary)", not cr["adf_b"]["is_stationary"]),
+                (f"Engle-Granger spread ADF: p < 0.05 (stationary spread)", cr["eg"]["is_cointegrated"]),
+            ]
+            for label, passed in criteria:
+                icon = "✓" if passed else "✗"
+                color = "green" if passed else "red"
+                st.markdown(f":{color}[{icon}] {label}")
+
+            pair_conc = pair_conclusion(cr["pair_passes"])
+            if cr["pair_passes"]:
+                st.success(f"✓ {pair_conc}")
             else:
-                x_vals = sc_ret[sc_sym1].values
-                y_vals = sc_ret[sc_sym2].values
-                pearson_r = float(np.corrcoef(x_vals, y_vals)[0, 1])
-                beta = float(np.polyfit(x_vals, y_vals, 1)[0])
+                st.error(f"✗ {pair_conc}")
 
-                x_line = np.linspace(x_vals.min(), x_vals.max(), 100)
-                y_line = np.polyval([beta, np.polyfit(x_vals, y_vals, 1)[1]], x_line)
+# ─── Tab 4: Trading Signals ───────────────────────────────────────────────────
+with tab_signals:
+    st.header("Trading Signals — Rolling Pairs Strategy")
+    st.caption(
+        "Rolling 90-day hedge ratio + z-score strategy. "
+        "Best applied to pairs that pass the Cointegration Test. "
+        "Signals: z < −2 → LONG spread, z > 2 → SHORT spread, |z| < 0.5 → EXIT."
+    )
 
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=x_vals, y=y_vals,
-                    mode="markers",
-                    name="Daily returns",
-                    marker=dict(size=5, opacity=0.55, color="#2196F3"),
+    ts_tickers = _tickers()
+    ts_default_a = "NVDA" if "NVDA" in ts_tickers else ts_tickers[0]
+    ts_others = [t for t in ts_tickers if t != ts_default_a]
+    ts_default_b = "TSM" if "TSM" in ts_others else ts_others[0]
+
+    tsc1, tsc2, tsc3 = st.columns([2, 2, 1])
+    with tsc1:
+        ts_sym_a = st.selectbox("Stock A", ts_tickers, index=ts_tickers.index(ts_default_a), key="ts_a")
+    with tsc2:
+        ts_b_opts = [t for t in ts_tickers if t != ts_sym_a]
+        ts_sym_b = st.selectbox("Stock B", ts_b_opts,
+                                index=ts_b_opts.index(ts_default_b) if ts_default_b in ts_b_opts else 0,
+                                key="ts_b")
+    with tsc3:
+        ts_window = st.number_input("Window (days)", min_value=30, max_value=252, value=90, step=10, key="ts_win")
+
+    ts_run = st.button("Compute Signals", type="primary", key="ts_run")
+
+    if ts_run:
+        with st.spinner(f"Computing rolling signals for {ts_sym_a} / {ts_sym_b}…"):
+            try:
+                ts_pa, ts_pb = ts_fetch_prices(ts_sym_a, ts_sym_b)
+                ts_df = compute_rolling_signals(ts_pa, ts_pb, window=int(ts_window))
+                st.session_state["ts_df"] = ts_df
+                st.session_state["ts_sym_a"] = ts_sym_a
+                st.session_state["ts_sym_b"] = ts_sym_b
+            except Exception as exc:
+                st.error(f"Computation failed: {exc}")
+                st.session_state.pop("ts_df", None)
+
+    if "ts_df" in st.session_state:
+        ts_df = st.session_state["ts_df"]
+        sym_a_lbl = st.session_state["ts_sym_a"]
+        sym_b_lbl = st.session_state["ts_sym_b"]
+        valid = ts_df.dropna(subset=["z_score"])
+
+        st.markdown("---")
+
+        # ── Current signal ─────────────────────────────────────────────────
+        latest = valid.iloc[-1]
+        cur_sig = latest["signal"]
+        cur_z = latest["z_score"]
+        cur_beta = latest["beta"]
+        translation = signal_translation(latest, sym_a_lbl, sym_b_lbl)
+
+        sig_color = {"LONG": "green", "SHORT": "red", "EXIT": "orange", "HOLD": "blue"}.get(cur_sig, "gray")
+        st.subheader("Current Signal")
+        cs1, cs2, cs3, cs4 = st.columns(4)
+        cs1.metric("Signal", cur_sig)
+        cs2.metric("Z-Score", f"{cur_z:.3f}")
+        cs3.metric(f"β ({sym_a_lbl}/{sym_b_lbl})", f"{cur_beta:.4f}")
+        cs4.metric("Position A", f"{latest['position_a']:+.0f} unit")
+        st.markdown(f"**Trade:** :{sig_color}[{translation}]")
+        st.caption(f"Position B size = {abs(latest['position_b']):.4f} units of {sym_b_lbl} "
+                   f"(updated daily: position_B = β_t × |position_A|)")
+
+        st.markdown("---")
+
+        # ── Z-score chart ───────────────────────────────────────────────────
+        st.subheader("Z-Score & Signals")
+        sig_colors_map = {"LONG": "#1565C0", "SHORT": "#B71C1C", "EXIT": "#E65100", "HOLD": "#616161"}
+        point_colors = valid["signal"].map(sig_colors_map).fillna("#616161")
+
+        fig_z = go.Figure()
+        fig_z.add_trace(go.Scatter(
+            x=valid.index, y=valid["z_score"],
+            mode="lines", name="Z-Score",
+            line=dict(color="#78909C", width=1.2),
+        ))
+        # Overlay colored markers by signal
+        for sig, color in sig_colors_map.items():
+            mask = valid["signal"] == sig
+            if mask.any():
+                fig_z.add_trace(go.Scatter(
+                    x=valid.index[mask], y=valid["z_score"][mask],
+                    mode="markers", name=sig,
+                    marker=dict(color=color, size=4),
                 ))
-                fig.add_trace(go.Scatter(
-                    x=x_line, y=y_line,
-                    mode="lines",
-                    name=f"OLS  r={pearson_r:.3f}",
-                    line=dict(color="#e53935", dash="dash", width=2),
-                ))
-                fig.update_layout(
-                    title=f"{sc_sym1} vs {sc_sym2}  |  Pearson r = {pearson_r:.3f}",
-                    xaxis_title=f"{sc_sym1} Daily Return (%)",
-                    yaxis_title=f"{sc_sym2} Daily Return (%)",
-                    height=500,
-                    margin=dict(t=50),
-                )
-                st.plotly_chart(fig, use_container_width=True)
+        for level, label, dash in [(2, "+2 (SHORT)", "dash"), (-2, "−2 (LONG)", "dash"),
+                                    (0.5, "+0.5 (EXIT)", "dot"), (-0.5, "−0.5 (EXIT)", "dot")]:
+            fig_z.add_hline(y=level, line=dict(color="#aaa", dash=dash, width=1),
+                            annotation_text=label, annotation_position="right")
+        fig_z.update_layout(height=380, hovermode="x unified", margin=dict(t=30),
+                            legend=dict(orientation="h", y=-0.15))
+        st.plotly_chart(fig_z, use_container_width=True)
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Pearson r", f"{pearson_r:.4f}")
-                m2.metric("R²", f"{pearson_r**2:.4f}")
-                m3.metric(f"Beta ({sc_sym2}/{sc_sym1})", f"{beta:.4f}")
-                m4.metric("Observations", str(len(x_vals)))
+        # ── Rolling β chart ─────────────────────────────────────────────────
+        st.subheader("Rolling Hedge Ratio β")
+        fig_b = go.Figure()
+        fig_b.add_trace(go.Scatter(
+            x=valid.index, y=valid["beta"],
+            mode="lines", name="β_t",
+            line=dict(color="#7B1FA2", width=1.5),
+        ))
+        fig_b.update_layout(height=260, margin=dict(t=10), yaxis_title="β",
+                            hovermode="x unified")
+        st.plotly_chart(fig_b, use_container_width=True)
 
-# ─── Tab 5: Correlation Network ───────────────────────────────────────────────
+        # ── Recent signals table ────────────────────────────────────────────
+        st.subheader("Recent Signal Log")
+        recent = valid.tail(30).copy()
+        recent["translation"] = recent.apply(lambda r: signal_translation(r, sym_a_lbl, sym_b_lbl), axis=1)
+        display_cols = ["z_score", "signal", "beta", "position_a", "position_b", "translation"]
+        st.dataframe(
+            recent[display_cols].rename(columns={
+                "z_score": "Z-Score", "signal": "Signal", "beta": "β",
+                "position_a": f"Pos {sym_a_lbl}", "position_b": f"Pos {sym_b_lbl}",
+                "translation": "Trade Instruction",
+            }).iloc[::-1],
+            use_container_width=True, hide_index=False,
+        )
+
+# ─── Tab 5: Daily PnL ─────────────────────────────────────────────────────────
+with tab_pnl:
+    st.header("Daily PnL")
+    st.caption("Based on the rolling pairs strategy computed in the Trading Signals tab.")
+
+    if "ts_df" not in st.session_state:
+        st.info("Run the strategy in the **Trading Signals** tab first.")
+    else:
+        pnl_df = st.session_state["ts_df"]
+        sym_a_lbl = st.session_state.get("ts_sym_a", "A")
+        sym_b_lbl = st.session_state.get("ts_sym_b", "B")
+        pnl_valid = pnl_df.dropna(subset=["pnl"])
+
+        # ── Summary metrics ─────────────────────────────────────────────────
+        total_pnl = pnl_valid["pnl"].sum()
+        trading_days = (pnl_valid["position_a"].shift(1) != 0).sum()
+        active_pnl = pnl_valid.loc[pnl_valid["position_a"].shift(1) != 0, "pnl"]
+        win_rate = (active_pnl > 0).mean() * 100 if len(active_pnl) > 0 else 0
+        daily_ret = pnl_valid["pnl"]
+        sharpe = (daily_ret.mean() / daily_ret.std() * np.sqrt(252)) if daily_ret.std() > 0 else 0
+        cum = pnl_valid["cumulative_pnl"]
+        max_dd = (cum - cum.cummax()).min()
+
+        pm1, pm2, pm3, pm4, pm5 = st.columns(5)
+        pm1.metric("Total PnL ($)", f"{total_pnl:+.2f}")
+        pm2.metric("Sharpe Ratio", f"{sharpe:.2f}")
+        pm3.metric("Max Drawdown ($)", f"{max_dd:.2f}")
+        pm4.metric("Win Rate", f"{win_rate:.1f}%")
+        pm5.metric("Active Days", str(int(trading_days)))
+
+        st.markdown("---")
+
+        # ── Cumulative PnL ──────────────────────────────────────────────────
+        st.subheader("Cumulative PnL")
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(
+            x=pnl_valid.index, y=pnl_valid["cumulative_pnl"],
+            mode="lines", fill="tozeroy",
+            line=dict(color="#1976D2", width=1.8),
+            fillcolor="rgba(25,118,210,0.12)",
+            name="Cumulative PnL",
+        ))
+        fig_cum.add_hline(y=0, line=dict(color="#aaa", dash="dash", width=1))
+        fig_cum.update_layout(height=320, margin=dict(t=10),
+                              yaxis_title="PnL ($)", hovermode="x unified")
+        st.plotly_chart(fig_cum, use_container_width=True)
+
+        # ── Daily PnL bars ──────────────────────────────────────────────────
+        st.subheader("Daily PnL")
+        bar_colors = np.where(pnl_valid["pnl"] >= 0, "#388E3C", "#D32F2F")
+        fig_daily = go.Figure()
+        fig_daily.add_trace(go.Bar(
+            x=pnl_valid.index, y=pnl_valid["pnl"],
+            marker_color=bar_colors,
+            name="Daily PnL",
+        ))
+        fig_daily.add_hline(y=0, line=dict(color="#aaa", width=1))
+        fig_daily.update_layout(height=300, margin=dict(t=10),
+                                yaxis_title="PnL ($)", hovermode="x unified")
+        st.plotly_chart(fig_daily, use_container_width=True)
+
+        # ── Monthly breakdown ───────────────────────────────────────────────
+        st.subheader("Monthly PnL Breakdown")
+        monthly = pnl_valid["pnl"].resample("ME").sum().reset_index()
+        monthly.columns = ["Month", "PnL"]
+        monthly["Month"] = monthly["Month"].dt.strftime("%Y-%m")
+        fig_m = go.Figure(go.Bar(
+            x=monthly["Month"], y=monthly["PnL"],
+            marker_color=np.where(monthly["PnL"] >= 0, "#388E3C", "#D32F2F"),
+        ))
+        fig_m.update_layout(height=280, margin=dict(t=10),
+                            xaxis_title="Month", yaxis_title="PnL ($)")
+        st.plotly_chart(fig_m, use_container_width=True)
+
+# ─── Tab 6: Correlation Network ───────────────────────────────────────────────
 with tab_network:
     st.header("Correlation Network")
     st.caption(
@@ -536,7 +752,7 @@ with tab_manage:
     # ── Add ticker ──
     st.subheader("Add Ticker")
     st.caption(
-        "Fetches 1y of price data for the new ticker from yfinance, inserts it, "
+        "Fetches 5y of price data for the new ticker from yfinance, inserts it, "
         "then recomputes correlations for all active tickers."
     )
     add_col1, add_col2 = st.columns([2, 1])
@@ -565,7 +781,7 @@ with tab_manage:
 
     # ── Remove ticker ──
     st.subheader("Remove Ticker")
-    st.caption("Deletes the ticker's prices and correlations from DB. Other pairs are unaffected.")
+    st.caption("Deletes all data for this ticker — prices, correlations, history, and company record. Other pairs are unaffected.")
     if db_tickers:
         rm_col1, rm_col2 = st.columns([2, 1])
         with rm_col1:
@@ -589,7 +805,7 @@ with tab_manage:
     # ── Manual refresh ──
     st.subheader("Manual ETL Refresh")
     st.caption(
-        "Re-fetches the latest 1y of prices for all DB tickers, updates stock_prices, "
+        "Re-fetches the latest 5y of prices for all DB tickers, updates stock_prices, "
         "and recomputes correlations. Safe to run repeatedly — prices are idempotent."
     )
     if st.button("Refresh All Data", type="primary", key="refresh_btn"):
@@ -605,42 +821,3 @@ with tab_manage:
                 except Exception as exc:
                     st.error(f"ETL failed: {exc}")
 
-# ─── Tab 8: ETL Log ───────────────────────────────────────────────────────────
-with tab_log:
-    st.header("ETL Log")
-    st.caption(
-        "Every pipeline run appends a row here — whether triggered from 'Manage Tickers' "
-        "or the CLI. Status `error` rows include the exception message."
-    )
-
-    log_df = _etl_log(50)
-
-    if log_df.empty:
-        st.info("No ETL runs recorded yet. Run the ETL from 'Manage Tickers' or via `python3 etl/load.py`.")
-    else:
-        # Reorder columns for readability
-        cols = ["run_at", "status", "tickers", "rows_inserted", "rows_skipped", "duration_sec", "error_msg"]
-        cols = [c for c in cols if c in log_df.columns]
-        st.dataframe(
-            log_df[cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "run_at": st.column_config.DatetimeColumn("Run At", format="YYYY-MM-DD HH:mm:ss"),
-                "status": st.column_config.TextColumn("Status"),
-                "tickers": st.column_config.TextColumn("Tickers"),
-                "rows_inserted": st.column_config.NumberColumn("Inserted", format="%d"),
-                "rows_skipped": st.column_config.NumberColumn("Skipped", format="%d"),
-                "duration_sec": st.column_config.NumberColumn("Duration (s)", format="%.2f"),
-                "error_msg": st.column_config.TextColumn("Error"),
-            },
-        )
-
-        # Summary metrics
-        total = len(log_df)
-        successes = (log_df["status"] == "success").sum()
-        last_run = log_df["run_at"].iloc[0] if not log_df.empty else None
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Total runs", total)
-        s2.metric("Successful", int(successes))
-        s3.metric("Last run", str(last_run)[:19] if last_run is not None else "—")

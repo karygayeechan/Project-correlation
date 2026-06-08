@@ -1,0 +1,19 @@
+1. first run ADF test Tests and conclude Is this series stationary?
+
+Stationary means: constant mean; constant variance; doesn't wander indefinitely
+
+First, You run ADF twice: for both stock A and stock B. give me the results of these two ADF separately.
+interpretation of ADF test: p<0.05 = stationary ; p>0.05 = non-stationary. if they are non-stationary please give it a check mark; if they are stationary please give it a question mark.
+
+
+2. second, run Engle-Granger test Tests: Are these two non-stationary series cointegrated?
+
+Procedure:
+   1) Regress A on B
+   2) Compute residuals based on  ϵ​=A−(α+βB​)
+   3) Run ADF on residuals (include the step of calculating hedge ratio β (how many units of stock B do i need to match 1 unit of A); creating residuals and run ADF)
+
+If residuals are stationary: pair is cointegrated 
+p<0.05 = cointegrated (spread is stationary); p>0.05 = not cointegrated (spread is not stationary)
+
+Finally, if the pair satisfies all these criteria, give the pair a checkmark (pair passes): 1) ADF on stock A: p>0.05; 2) ADF on stock B: p>0.05; 3) Engle-Granger: p<0.05; 4) ADF on spread: p<0.05

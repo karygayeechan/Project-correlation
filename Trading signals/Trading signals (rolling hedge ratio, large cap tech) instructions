@@ -1,0 +1,10 @@
+After a pair of stock has received positive recommendation from cointegration test (passes all criteria), perform below steps:
+
+1. choose a rolling window of 90 days.
+2. Compute rolling hedge ratio βₜ: At each time t, run regression using only past data
+3. Compute rolling spread (at each time t): spreadt​=At​−(αt​+βt​Bt​) 
+4. Convert spread into rolling z-score (at each time t): zt​=(​spreadt​−μt)/σt​​
+5. Generate trading signals: 1) z<-2 = LONG spread 2)z>2 = SHORT spread 3)|z| < 0.5 = EXIT the trade
+6. Translate signals into actual positions: 1) z<-2 = LONG spread : translate into buy A and sell β × B 2)z>2 = SHORT spread : translate into sell A and buy β × B. print the translations of these signals out based on calculation.
+7. Update the position sizing every day based on the rolling β for time t: position_B = β_t × position_A. print the position size.
+8. Build daily PnL: PnLt​=positionA​⋅ΔAt​+positionB​⋅ΔBt​
