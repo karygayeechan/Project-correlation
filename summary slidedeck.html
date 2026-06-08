@@ -385,14 +385,15 @@
     <div class="header">
       <div class="header-left">
         <h1>Stock Correlation Project</h1>
-        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations over 1-month and 6-month windows, persists results in PostgreSQL, surfaces them via an interactive Streamlit dashboard, and generates AI-powered regime commentary via Claude.</p>
+        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations, runs cointegration tests, generates rolling pairs-trading signals, persists results in PostgreSQL, surfaces them via an 8-tab Streamlit dashboard, and generates AI-powered regime commentary via Claude.</p>
         <div class="purpose-row">
           <div class="purpose">
             <div class="purpose-label">Purpose of the Analysis</div>
             <ul class="purpose-list">
               <li>Identify correlation patterns in strongly correlated stocks and their potential implications in pair trading strategies</li>
+              <li>Test pairs for cointegration (ADF + Engle-Granger) to confirm a stable long-run spread exists</li>
+              <li>Generate actionable LONG/SHORT/EXIT signals via rolling z-score and daily PnL tracking</li>
               <li>Identify potential regime changes versus temporary market effects driving co-movement</li>
-              <li>Identify the need for diversification across stocks exhibiting strong volatile returns</li>
             </ul>
           </div>
           <div class="pair-chart">
@@ -509,7 +510,7 @@
             <div class="step-icon viz">&#9632;</div>
             <div class="step-text">
               <strong>Visualize</strong>
-              <span>FastAPI serves results; Streamlit renders 9-tab dashboard with heatmap, rolling corr &amp; regime alerts</span>
+              <span>FastAPI serves results; Streamlit renders 8-tab dashboard: heatmap, rolling corr, cointegration, trading signals, daily PnL, network, volatility, regime alerts</span>
             </div>
           </div>
 
@@ -614,7 +615,15 @@
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
-            <span>Streamlit — 9-tab dashboard with ticker, date &amp; regime alerts</span>
+            <span>Streamlit — 8-tab dashboard: heatmap, rolling corr, cointegration, signals, PnL, network, vol, alerts</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>Cointegration test — ADF per series + Engle-Granger (α/β → spread ADF)</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>Trading signals — rolling 90-day β, z-score, LONG/SHORT/EXIT, daily PnL &amp; Sharpe</span>
           </div>
         </div>
 
@@ -628,6 +637,7 @@
             <span class="tech-pill db">psycopg2</span>
             <span class="tech-pill api">FastAPI</span>
             <span class="tech-pill api">Anthropic</span>
+            <span class="tech-pill py">statsmodels</span>
             <span class="tech-pill viz">Streamlit</span>
             <span class="tech-pill viz">Plotly</span>
           </div>
@@ -648,6 +658,8 @@
         <span class="design-pill">Three-tier architecture</span>
         <span class="design-pill">30-day commentary baseline</span>
         <span class="design-pill">DB-cached AI alerts</span>
+        <span class="design-pill">Engle-Granger cointegration</span>
+        <span class="design-pill">Rolling z-score signals</span>
       </div>
     </div>
 

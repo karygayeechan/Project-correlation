@@ -1,14 +1,16 @@
 # Stock Correlation Analysis
 
-Analyzes return correlations between tech stocks using a PostgreSQL database, automated ETL pipeline, Streamlit dashboard, and an AI commentary agent.
+Analyzes return correlations between tech stocks using a PostgreSQL database, automated ETL pipeline, Streamlit dashboard, AI commentary agent, statistical cointegration tests, and rolling pairs-trading signals.
 
 ## What This Project Does
 
-1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 tickers: NVDA, GOOGL, AVGO, ARM, TSM
+1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 years across tickers: NVDA, GOOGL, AVGO, ARM, TSM (and any dynamically added tickers)
 2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over 1-month and 6-month windows
 3. **Loads** everything into PostgreSQL
-4. **Visualizes** correlations in a 9-tab Streamlit dashboard with interactive controls, ticker management, and ETL logging
+4. **Visualizes** correlations in an 8-tab Streamlit dashboard with interactive controls and ticker management
 5. **Generates AI commentary** — after each ETL run, an agent compares the latest correlations against a 30-day baseline and writes a plain-English regime summary via the Claude API
+6. **Cointegration testing** — ADF test on individual price series + Engle-Granger test to determine if a pair shares a stable long-run relationship
+7. **Trading signals** — rolling 90-day hedge ratio, z-score spread signals (LONG/SHORT/EXIT), daily position sizing, and PnL tracking
 
 ---
 
@@ -33,21 +35,30 @@ Analyzes return correlations between tech stocks using a PostgreSQL database, au
 ```
 project_correlation/
 ├── db/
-│   └── schema.sql              # CREATE TABLE / CREATE INDEX (IF NOT EXISTS — idempotent)
+│   └── schema.sql                        # CREATE TABLE / CREATE INDEX (IF NOT EXISTS — idempotent)
 ├── etl/
-│   ├── extract.py              # fetch raw OHLCV + metadata from yfinance
-│   ├── transform.py            # reshape wide→long; compute 1m/6m Pearson correlations
-│   └── load.py                 # insert companies, prices, correlations; archive snapshot; run commentary agent
+│   ├── extract.py                        # fetch raw 5-year OHLCV + metadata from yfinance
+│   ├── transform.py                      # reshape wide→long; compute 1m/6m Pearson correlations
+│   └── load.py                           # insert companies, prices, correlations; archive snapshot; run commentary agent
 ├── agent/
 │   ├── __init__.py
-│   ├── commentary.py           # AI commentary agent — compares correlation snapshots, calls Claude API
-│   └── AGENT.md                # detailed breakdown of the agent implementation
+│   ├── commentary.py                     # AI commentary agent — compares correlation snapshots, calls Claude API
+│   └── AGENT.md                          # detailed breakdown of the agent implementation
 ├── api/
-│   └── main.py                 # FastAPI backend — REST endpoints over the DB
+│   └── main.py                           # FastAPI backend — REST endpoints over the DB
 ├── app/
-│   ├── db.py                   # read-only DB query layer (used by the API)
-│   ├── api_client.py           # HTTP client wrapping the API (used by Streamlit)
-│   └── streamlit_app.py        # 9-tab Streamlit dashboard
+│   ├── db.py                             # read-only DB query layer (used by the API)
+│   ├── api_client.py                     # HTTP client wrapping the API (used by Streamlit)
+│   └── streamlit_app.py                  # 8-tab Streamlit dashboard
+├── Cointegration test/
+│   ├── cointegration.py                  # ADF + Engle-Granger computation module
+│   ├── conclusions.py                    # plain-English verdict strings
+│   ├── PLAN.md                           # implementation plan
+│   └── Cointegration test instruction    # original spec
+├── Trading signals/
+│   ├── trading_signals.py                # rolling hedge ratio, z-score signals, PnL
+│   ├── PLAN.md                           # implementation plan
+│   └── Trading signals (...) instructions  # original spec
 └── README.md
 ```
 
@@ -79,7 +90,7 @@ streamlit run app/streamlit_app.py
 ## What Is Done
 
 - [x] Database schema (`db/schema.sql`) — 7 tables, indexes, constraints, `IF NOT EXISTS` for safe re-runs
-- [x] `etl/extract.py` — fetches 1 year of daily prices + company metadata from yfinance
+- [x] `etl/extract.py` — fetches 5 years of daily prices + company metadata from yfinance
 - [x] `etl/transform.py` — reshapes wide DataFrame to long format; `compute_correlations()` produces 1m/6m Pearson pairs
 - [x] `etl/load.py` — inserts companies, company_details, stock_prices (`ON CONFLICT DO NOTHING`); upserts correlations (`ON CONFLICT DO UPDATE`); archives snapshot to `correlation_history`; calls commentary agent; writes `etl_log` row on success or error; accepts dynamic ticker list
 - [x] ETL logging — every pipeline run writes status, row counts, duration, and any error to `etl_log`
@@ -87,11 +98,15 @@ streamlit run app/streamlit_app.py
 - [x] `app/db.py` — read-only query layer: tickers, stock prices, on-the-fly correlation matrices, rolling correlations, alerts, ETL log
 - [x] `api/main.py` — FastAPI backend with 10 REST endpoints (health, tickers CRUD, prices, correlations heatmap/rolling, alerts, ETL log/run); interactive docs at `/docs`
 - [x] `app/api_client.py` — httpx client wrapping the API; mirrors `db.py` signatures so Streamlit needs no DB access
-- [x] `app/streamlit_app.py` — full 9-tab dashboard (see Dashboard section below)
-- [x] Tickers finalized — NVDA, GOOGL, AVGO, ARM, TSM (AAPL replaced with NVDA)
+- [x] `app/streamlit_app.py` — 8-tab dashboard (see Dashboard section below)
+- [x] Tickers finalized — NVDA, GOOGL, AVGO, ARM, TSM (dynamically extensible via Manage Tickers)
 - [x] `agent/commentary.py` — AI commentary agent comparing monthly correlation snapshots via Claude API
 - [x] `correlation_history` table — accumulates one snapshot per ETL day per pair; enables 30-day delta comparisons
 - [x] `correlation_alerts` table — stores generated commentary with current and baseline dates
+- [x] `Cointegration test/cointegration.py` — ADF on each series + Engle-Granger (OLS → α/β → ADF on residuals); pass/fail verdict
+- [x] `Cointegration test/conclusions.py` — plain-English verdict strings
+- [x] `Trading signals/trading_signals.py` — rolling 90-day OLS hedge ratio, z-score signals, stateful positions with daily β refresh, daily PnL
+- [x] Manage Tickers ETL corrected to 5-year data fetch (was labelled 1y in UI)
 
 ---
 
@@ -104,14 +119,14 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 | Tab | Type | Description |
 |---|---|---|
 | **Correlation Heatmap** | Read | Pairwise Pearson r matrix computed from DB prices. Toggle tickers, period (1m/6m), and end date to explore historical correlation regimes. Ranked pairs table below the heatmap. |
-| **Rolling Correlation** | Read | Picks a ticker pair and rolling window (21/42/63/126 days). Plots how the correlation evolves over time — useful for spotting regime changes or event-driven decoupling. |
-| **Price & Returns** | Read | Normalized price (base = 100 at window start) and daily returns bar chart. Toggle between views or show both. |
-| **Pair Scatter** | Read | Daily return scatter for any two tickers with OLS trendline. Shows Pearson r, R², and beta. |
+| **Rolling Correlation** | Read | Picks a ticker pair (defaults to AAPL/GOOGL) and rolling window (21/42/63/126 days). Plots how the correlation evolves over time — useful for spotting regime changes or event-driven decoupling. |
+| **Cointegration Test** | Read | ADF test on each price series to confirm non-stationarity, then Engle-Granger test (OLS regression → residuals → ADF on spread `ϵt = A − (α + β·B)`). Pass/fail verdict with plain-English conclusions. |
+| **Trading Signals** | Read | Rolling 90-day pairs strategy for any two tickers. Computes hedge ratio β, spread z-score, and generates LONG/SHORT/EXIT signals. Shows current trade instruction, z-score chart, rolling β, and recent signal log. |
+| **Daily PnL** | Read | Reads results from the Trading Signals tab. Shows cumulative PnL, daily bar chart (green/red), monthly breakdown, Sharpe ratio, max drawdown, and win rate. |
 | **Network Graph** | Read | Circular graph where edge thickness and color encode correlation strength (green = positive, red = negative). Threshold slider removes weak edges. |
 | **Volatility Tracker** | Read | Rolling annualized realized volatility (σ × √252) per ticker. Contextualizes correlations — high vol changes how co-movement translates to portfolio risk. |
 | **Regime Alerts** | Read | Latest AI-generated commentary comparing correlations against a 30-day baseline. Only populated once ≥ 30 days of history exists. Full alert history table below the latest summary. |
-| **Manage Tickers** | Write | Add a ticker (triggers ETL for all current + new), remove a ticker (cascades deletes), or refresh all data. All operations update the DB and reload charts immediately. |
-| **ETL Log** | Read | Table of all pipeline runs — timestamp, status, tickers processed, rows inserted/skipped, duration, and error message if failed. Auto-refreshes after any write. |
+| **Manage Tickers** | Write | Add a ticker (fetches 5 years, triggers ETL for all current + new), remove a ticker (cascades deletes from all 5 ticker-linked tables), or refresh all data. |
 
 ---
 
@@ -145,14 +160,14 @@ Using `uv` (recommended):
 ```bash
 uv venv --python 3.11
 source .venv/bin/activate
-uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic
+uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic statsmodels
 ```
 
 Using standard `pip`:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic
+pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic statsmodels
 ```
 
 ### 4. Configure environment variables
