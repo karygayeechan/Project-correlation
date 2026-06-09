@@ -7,10 +7,11 @@ Analyzes return correlations between tech stocks using a PostgreSQL database, au
 1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 years across tickers: NVDA, GOOGL, AVGO, ARM, TSM (and any dynamically added tickers)
 2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over 1-month and 6-month windows
 3. **Loads** everything into PostgreSQL
-4. **Visualizes** correlations in an 8-tab Streamlit dashboard with interactive controls and ticker management
+4. **Visualizes** correlations in a 6-tab Streamlit dashboard with interactive controls and ticker management
 5. **Generates AI commentary** — after each ETL run, an agent compares the latest correlations against a 30-day baseline and writes a plain-English regime summary via the Claude API
-6. **Cointegration testing** — ADF test on individual price series + Engle-Granger test to determine if a pair shares a stable long-run relationship
+6. **Cointegration testing** — ADF test on individual price series + bidirectional Engle-Granger test (both A→B and B→A) to determine if a pair shares a stable long-run relationship
 7. **Trading signals** — rolling 90-day hedge ratio, z-score spread signals (LONG/SHORT/EXIT), daily position sizing, and PnL tracking
+8. **Backtesting** — 4-year training warm-up + 1-year out-of-sample evaluation with performance, risk, stability, and scalability metrics
 
 ---
 
@@ -49,9 +50,9 @@ project_correlation/
 ├── app/
 │   ├── db.py                             # read-only DB query layer (used by the API)
 │   ├── api_client.py                     # HTTP client wrapping the API (used by Streamlit)
-│   └── streamlit_app.py                  # 8-tab Streamlit dashboard
+│   └── streamlit_app.py                  # 6-tab Streamlit dashboard
 ├── Cointegration test/
-│   ├── cointegration.py                  # ADF + Engle-Granger computation module
+│   ├── cointegration.py                  # ADF + bidirectional Engle-Granger computation module
 │   ├── conclusions.py                    # plain-English verdict strings
 │   ├── PLAN.md                           # implementation plan
 │   └── Cointegration test instruction    # original spec
@@ -59,6 +60,9 @@ project_correlation/
 │   ├── trading_signals.py                # rolling hedge ratio, z-score signals, PnL
 │   ├── PLAN.md                           # implementation plan
 │   └── Trading signals (...) instructions  # original spec
+├── Backtest/
+│   ├── backtest.py                       # 4yr/1yr train-test split; performance, risk, stability, scalability metrics
+│   └── PLAN.md                           # implementation plan
 └── README.md
 ```
 
@@ -98,14 +102,15 @@ streamlit run app/streamlit_app.py
 - [x] `app/db.py` — read-only query layer: tickers, stock prices, on-the-fly correlation matrices, rolling correlations, alerts, ETL log
 - [x] `api/main.py` — FastAPI backend with 10 REST endpoints (health, tickers CRUD, prices, correlations heatmap/rolling, alerts, ETL log/run); interactive docs at `/docs`
 - [x] `app/api_client.py` — httpx client wrapping the API; mirrors `db.py` signatures so Streamlit needs no DB access
-- [x] `app/streamlit_app.py` — 8-tab dashboard (see Dashboard section below)
+- [x] `app/streamlit_app.py` — 6-tab dashboard (see Dashboard section below)
 - [x] Tickers finalized — NVDA, GOOGL, AVGO, ARM, TSM (dynamically extensible via Manage Tickers)
 - [x] `agent/commentary.py` — AI commentary agent comparing monthly correlation snapshots via Claude API
 - [x] `correlation_history` table — accumulates one snapshot per ETL day per pair; enables 30-day delta comparisons
 - [x] `correlation_alerts` table — stores generated commentary with current and baseline dates
-- [x] `Cointegration test/cointegration.py` — ADF on each series + Engle-Granger (OLS → α/β → ADF on residuals); pass/fail verdict
+- [x] `Cointegration test/cointegration.py` — ADF on each series + **bidirectional** Engle-Granger (A→B and B→A); primary direction = lower p-value; both results shown on dashboard
 - [x] `Cointegration test/conclusions.py` — plain-English verdict strings
 - [x] `Trading signals/trading_signals.py` — rolling 90-day OLS hedge ratio, z-score signals, stateful positions with daily β refresh, daily PnL
+- [x] `Backtest/backtest.py` — 4yr train / 1yr test split; performance, trading activity, risk, stability, and scalability metrics; in-memory only (no DB writes)
 - [x] Manage Tickers ETL corrected to 5-year data fetch (was labelled 1y in UI)
 
 ---
@@ -118,15 +123,12 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 
 | Tab | Type | Description |
 |---|---|---|
-| **Correlation Heatmap** | Read | Pairwise Pearson r matrix computed from DB prices. Toggle tickers, period (1m/6m), and end date to explore historical correlation regimes. Ranked pairs table below the heatmap. |
-| **Rolling Correlation** | Read | Picks a ticker pair (defaults to AAPL/GOOGL) and rolling window (21/42/63/126 days). Plots how the correlation evolves over time — useful for spotting regime changes or event-driven decoupling. |
-| **Cointegration Test** | Read | ADF test on each price series to confirm non-stationarity, then Engle-Granger test (OLS regression → residuals → ADF on spread `ϵt = A − (α + β·B)`). Pass/fail verdict with plain-English conclusions. |
-| **Trading Signals** | Read | Rolling 90-day pairs strategy for any two tickers. Computes hedge ratio β, spread z-score, and generates LONG/SHORT/EXIT signals. Shows current trade instruction, z-score chart, rolling β, and recent signal log. |
-| **Daily PnL** | Read | Reads results from the Trading Signals tab. Shows cumulative PnL, daily bar chart (green/red), monthly breakdown, Sharpe ratio, max drawdown, and win rate. |
-| **Network Graph** | Read | Circular graph where edge thickness and color encode correlation strength (green = positive, red = negative). Threshold slider removes weak edges. |
-| **Volatility Tracker** | Read | Rolling annualized realized volatility (σ × √252) per ticker. Contextualizes correlations — high vol changes how co-movement translates to portfolio risk. |
+| **Correlation** | Read | Three sub-tabs: **Heatmap** (pairwise Pearson r matrix; toggle tickers, period, end date; ranked pairs table), **Rolling** (pair correlation over time with selectable window: 21/42/63/126 days), **Network Graph** (circular graph; edge thickness/color encode correlation strength; threshold slider). |
+| **Cointegration** | Read | ADF test on each price series to confirm non-stationarity, then **bidirectional** Engle-Granger test (A→B and B→A). Primary direction = lower spread ADF p-value; both results shown with ★ badge. Pass/fail verdict with plain-English conclusions. Default pair: MSFT/META. |
+| **Trading Signals** | Read | Rolling 90-day pairs strategy for any two tickers. Computes hedge ratio β, spread z-score, and generates LONG/SHORT/EXIT signals. Shows current trade instruction, z-score chart, rolling β, and signal log. Hypothetical 5-year PnL section at bottom (cumulative PnL, Sharpe, max drawdown, win rate). Default pair: MSFT/META. |
+| **Backtest (4yr/1yr)** | Read | Out-of-sample evaluation: 4-year rolling warm-up + last 1 year as test slice. Five sections: Performance (Sharpe, Calmar, drawdown, win rate), Trading Activity (trade count, holding period, cost sensitivity), Risk (vol, VaR, CVaR, skew, kurtosis), Stability (rolling ADF, z-score histogram, β series, rolling half-life), Scalability (1×/2×/5× position size comparison). Default pair: MSFT/META. |
 | **Regime Alerts** | Read | Latest AI-generated commentary comparing correlations against a 30-day baseline. Only populated once ≥ 30 days of history exists. Full alert history table below the latest summary. |
-| **Manage Tickers** | Write | Add a ticker (fetches 5 years, triggers ETL for all current + new), remove a ticker (cascades deletes from all 5 ticker-linked tables), or refresh all data. |
+| **Manage Tickers** | Write | Add a ticker (fetches 5 years, triggers ETL for all current + new), remove a ticker (cascades deletes from all ticker-linked tables), or refresh all data. |
 
 ---
 

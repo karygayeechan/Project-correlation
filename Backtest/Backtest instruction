@@ -1,0 +1,36 @@
+Follow below steps for backtest (training/testing split):
+1. For this step only, split the past 5 year data into testing period (define the testing period as the most recent 1 full year) and training period (define the training period as the 4 full years before training period). The split should not impact other tasks / create database changes.
+   
+2. compute below metrics for testing period:
+   1) performance
+   - Total PnL & annualized return. Calculate the 5% percentile trade PnL and 95th percentile trade PnL.
+   - Sharpe ratio. give me an indication whether the Sharpe ratio is good or bad. If it is <0.5 = bad; if it is between 0.5-1 = weak; if it is between 1 and 2 = decent; if it is >2 = strong. Compute Sharpe in chunks e.g. every quarter as well as rolling 30-day and rolling 60-day Sharpe.
+   - Drawdown including maximum drawdown. The formula being: MDD = max(peak-to-trough loss)
+   - Calmar ratio (how much safe money being made without large crashes) = Annualized return/maximum drawdown. Interpret the results in: <0.5 = weak ; 0.5-1.0 = acceptable; 1.0-2.0 = good; 2.0-3.0: very good; >3.0 = excellent (check for overfits)
+   - Win Rate = total amount of profitable trades/ total amount of trades
+   - Average profit per trade
+  
+   2) Trading activities metrics
+   - Total number of trades
+   - Average holding period
+   - Compute average half-life (speed of reversion). interpret the result as: 1-3 days = too fast/noisy; 5-20 days = ideal stat-arb zone; 20-50 days = slower swing trades; >50 days = capital inefficient
+   - Turnover/Transaction cost sensitivity =∑∣position_t​−position_t−1​∣. Test 0bps (theoretical edge), 1-5 bps(realistic equities) and 10+bps(stress test) and give corresponding Sharpe ratio. Give it an indication whether it is a good/bad strategy based on: good strategy = Sharpe drops slightly/remain unchanged with costs and Sharpe is still positive; bad strategy = Sharpe collapses to negative once costs added.
+   
+   3) Risk metrics
+  Compute
+   - Volatility of returns (denominator of Sharpe)
+   - Skewness
+   - Kurtosis
+   - VaR (95%) and CVaR
+   - Maximum losing streak both in days and value
+
+   4) Stability (plot them throughout test period and also calculate the standardized deviation)
+   - Spread stationarity
+   - Z-score distribution
+   - Hedge ratio β
+   - Rolling half-life 
+   - Standard deviation of Trade PnL
+
+
+
+   6) Scalability: Use the scenario of PnL x 2 and PnL x 5 and compute the metrics (do not display all the figures on front end), only highlight the difference to me in text on streamlit.

@@ -385,7 +385,7 @@
     <div class="header">
       <div class="header-left">
         <h1>Stock Correlation Project</h1>
-        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations, runs cointegration tests, generates rolling pairs-trading signals, persists results in PostgreSQL, surfaces them via an 8-tab Streamlit dashboard, and generates AI-powered regime commentary via Claude.</p>
+        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations, runs bidirectional cointegration tests, generates rolling pairs-trading signals, backtests on a 4yr/1yr train-test split, persists results in PostgreSQL, surfaces them via a 6-tab Streamlit dashboard, and generates AI-powered regime commentary via Claude.</p>
         <div class="purpose-row">
           <div class="purpose">
             <div class="purpose-label">Purpose of the Analysis</div>
@@ -510,7 +510,7 @@
             <div class="step-icon viz">&#9632;</div>
             <div class="step-text">
               <strong>Visualize</strong>
-              <span>FastAPI serves results; Streamlit renders 8-tab dashboard: heatmap, rolling corr, cointegration, trading signals, daily PnL, network, volatility, regime alerts</span>
+              <span>FastAPI serves results; Streamlit renders 6-tab dashboard: Correlation (heatmap / rolling / network), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts, Manage Tickers</span>
             </div>
           </div>
 
@@ -615,15 +615,19 @@
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
-            <span>Streamlit — 8-tab dashboard: heatmap, rolling corr, cointegration, signals, PnL, network, vol, alerts</span>
+            <span>Streamlit — 6-tab dashboard: Correlation (3 sub-tabs), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts, Manage Tickers</span>
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
-            <span>Cointegration test — ADF per series + Engle-Granger (α/β → spread ADF)</span>
+            <span>Cointegration — ADF per series + bidirectional Engle-Granger (A→B &amp; B→A; primary = lower p-value)</span>
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
             <span>Trading signals — rolling 90-day β, z-score, LONG/SHORT/EXIT, daily PnL &amp; Sharpe</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>Backtest — 4yr warm-up / 1yr test; Sharpe, Calmar, VaR, CVaR, cost sensitivity, stability charts</span>
           </div>
         </div>
 
@@ -658,8 +662,9 @@
         <span class="design-pill">Three-tier architecture</span>
         <span class="design-pill">30-day commentary baseline</span>
         <span class="design-pill">DB-cached AI alerts</span>
-        <span class="design-pill">Engle-Granger cointegration</span>
+        <span class="design-pill">Bidirectional Engle-Granger</span>
         <span class="design-pill">Rolling z-score signals</span>
+        <span class="design-pill">4yr/1yr train-test backtest</span>
       </div>
     </div>
 

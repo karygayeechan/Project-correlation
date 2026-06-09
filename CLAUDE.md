@@ -59,15 +59,21 @@ ANTHROPIC_API_KEY=<your_api_key>   # optional — ETL works without it; needed f
 - `api/main.py` — FastAPI backend with 10 endpoints; `app/db.py` is the query layer
 
 **Dashboard:**
-- `app/streamlit_app.py` — 8-tab Streamlit dashboard: Correlation Heatmap, Rolling Correlation, Cointegration Test, Trading Signals, Daily PnL, Network Graph, Volatility, Regime Alerts, Manage Tickers
+- `app/streamlit_app.py` — 6-tab Streamlit dashboard: Correlation (sub-tabs: Heatmap / Rolling / Network Graph), Cointegration, Trading Signals (+ hypothetical 5-year PnL), Backtest (4yr/1yr), Regime Alerts, Manage Tickers
 - `app/api_client.py` — HTTP client so Streamlit never touches the DB directly
 
-**Cointegration Test (`Cointegration test/`):**
-- `cointegration.py` — ADF test on each price series; Engle-Granger (OLS → α/β → ADF on spread `ϵt = A − (α + β·B)`); pass/fail verdict
+**Cointegration (`Cointegration test/`):**
+- `cointegration.py` — ADF test on each price series; Engle-Granger run in **both directions** (A→B and B→A); primary direction = lower p-value; both results shown on dashboard
 - `conclusions.py` — plain-English verdict strings for each test result
 
 **Trading Signals (`Trading signals/`):**
 - `trading_signals.py` — rolling 90-day OLS hedge ratio, spread, z-score, LONG/SHORT/EXIT/HOLD signals, daily position sizing (`position_B = −β_t × position_A`), daily PnL
+- Hypothetical 5-year PnL (cumulative, daily bars, monthly breakdown) is rendered at the bottom of the Trading Signals tab
+
+**Backtest (`Backtest/`):**
+- `backtest.py` — 4y/1y train-test split (4 years warm-up, last 1 year evaluated); in-memory only; computes performance, trading activity, risk, stability, and scalability metrics
+- `PLAN.md` — implementation notes and design decisions
+- `Backtest instruction` — original specification for the backtest tab
 
 **Database:**
 - 7 tables: `companies`, `company_details`, `stock_prices`, `correlations`, `correlation_history`, `correlation_alerts`, `etl_log`
@@ -85,12 +91,24 @@ ANTHROPIC_API_KEY=<your_api_key>   # optional — ETL works without it; needed f
 
 Commit work regularly — after each meaningful change (completing a function, fixing a bug, reaching a working state). Use `git push origin main` to sync to GitHub.
 
+## Documentation Reminder
+
+At the end of any session where structural changes were made (new tabs, renamed tabs, new modules, removed features, changed defaults, or schema changes), prompt the user:
+
+> "Docs may be stale — want me to update CLAUDE.md, README.md, summary slidedeck.html, and any relevant PLAN.md files to reflect today's changes?"
+
+Files to keep in sync:
+- `CLAUDE.md` — What's Built section, Architecture Decisions, Non-obvious Gotchas
+- `README.md` — What This Project Does, Project Structure, What Is Done checklist, Dashboard table
+- `summary slidedeck.html` — header description, Visualize step, Build Status list, design pills
+- `<module>/PLAN.md` — if the module's design changed
+
 ## Non-obvious Gotchas
 
 - **yfinance column naming**: extract.py flattens multi-level column tuples to strings like `"Close AAPL"` (space-separated). transform.py splits on spaces to parse ticker and field. Any yfinance output format change breaks both files.
 - **Hardcoded tickers**: `TICKERS` list is duplicated in both extract.py and transform.py — keep them in sync.
 - **Correlation windows**: "1m" ≈ 21 trading days, "6m" ≈ 126 trading days. Sort by date before computing daily returns.
 - **No test suite** — use each module's `if __name__ == "__main__"` block to smoke-test during development.
-- **Cointegration / Trading Signals modules live outside `app/`**: `Cointegration test/` and `Trading signals/` are added to `sys.path` at the top of `streamlit_app.py` — if you move them, update those `sys.path.insert` calls.
+- **Cointegration / Trading Signals / Backtest modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, and `Backtest/` are added to `sys.path` at the top of `streamlit_app.py` — if you move them, update those `sys.path.insert` calls.
 - **Trading Signals uses `st.session_state`**: results from the Trading Signals tab are stored under `st.session_state["ts_df"]` so the Daily PnL tab can read them without recomputing. If the user navigates to Daily PnL before running signals, they see a prompt to compute first.
 - **Decimal types from DB**: `psycopg2` returns `decimal.Decimal` for numeric columns — always cast to `float` before passing to numpy/statsmodels.

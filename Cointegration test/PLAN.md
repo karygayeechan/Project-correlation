@@ -44,11 +44,14 @@ run_engle_granger(series_a, series_b) -> dict
 run_all(sym_a, sym_b) -> dict
 ```
 - Calls all three functions above
-- Evaluates final pass condition:
+- Runs Engle-Granger in **both directions** (A→B and B→A) because EG is not symmetric — different regression orderings produce different residuals and can flip the verdict
+- Primary direction = whichever ordering gives the lower spread ADF p-value (stronger cointegration signal)
+- Evaluates final pass condition using the primary direction:
     1. ADF on A: p > 0.05  ✓
     2. ADF on B: p > 0.05  ✓
-    3. Engle-Granger residual ADF: p < 0.05  ✓
-- Returns full results dict including `pair_passes: bool`
+    3. Engle-Granger residual ADF (primary direction): p < 0.05  ✓
+- Returns full results dict including `pair_passes: bool`, `eg` (primary), `eg_direction`, `eg_reverse`, `eg_reverse_direction`
+- Dashboard shows both directions with primary starred (★) and reverse in purple
 
 ---
 

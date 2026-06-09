@@ -100,17 +100,34 @@ def run_engle_granger(series_a: pd.Series, series_b: pd.Series) -> dict:
 
 
 def run_all(sym_a: str, sym_b: str) -> dict:
-    """Run full cointegration analysis and return all results."""
+    """Run full cointegration analysis and return all results.
+
+    Engle-Granger is not symmetric: regressing A on B vs B on A produces
+    different residuals and can flip the verdict. Both directions are run;
+    the one with the lower spread ADF p-value is called 'primary' and drives
+    pair_passes. The other is returned as 'eg_reverse' for full transparency.
+    """
     series_a, series_b = fetch_prices(sym_a, sym_b)
     adf_a = run_adf(series_a, sym_a)
     adf_b = run_adf(series_b, sym_b)
-    eg = run_engle_granger(series_a, series_b)
 
-    # All four criteria must hold for the pair to pass
+    eg_ab = run_engle_granger(series_a, series_b)  # regress sym_a on sym_b
+    eg_ba = run_engle_granger(series_b, series_a)  # regress sym_b on sym_a
+
+    # Primary = direction with the stronger cointegration signal (lower p-value)
+    if eg_ab["p_value"] <= eg_ba["p_value"]:
+        eg_primary, eg_rev = eg_ab, eg_ba
+        eg_direction = f"{sym_a}→{sym_b}"
+        eg_rev_direction = f"{sym_b}→{sym_a}"
+    else:
+        eg_primary, eg_rev = eg_ba, eg_ab
+        eg_direction = f"{sym_b}→{sym_a}"
+        eg_rev_direction = f"{sym_a}→{sym_b}"
+
     pair_passes = (
-        not adf_a["is_stationary"]   # A is non-stationary
-        and not adf_b["is_stationary"]  # B is non-stationary
-        and eg["is_cointegrated"]       # spread is stationary
+        not adf_a["is_stationary"]
+        and not adf_b["is_stationary"]
+        and eg_primary["is_cointegrated"]
     )
 
     return {
@@ -118,7 +135,10 @@ def run_all(sym_a: str, sym_b: str) -> dict:
         "sym_b": sym_b,
         "adf_a": adf_a,
         "adf_b": adf_b,
-        "eg": eg,
+        "eg": eg_primary,
+        "eg_direction": eg_direction,
+        "eg_reverse": eg_rev,
+        "eg_reverse_direction": eg_rev_direction,
         "pair_passes": pair_passes,
     }
 
