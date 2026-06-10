@@ -12,11 +12,11 @@ load_dotenv()
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)                          # etl/ — for extract, transform
-sys.path.insert(0, os.path.join(_HERE, ".."))      # project root — for agent/
+sys.path.insert(0, os.path.join(_HERE, ".."))      # project root
+sys.path.insert(0, os.path.join(_HERE, "..", "Regime detection agent"))
 
 from extract import fetch_raw, fetch_ticker_info, TICKERS
 from transform import reshape, compute_correlations
-from agent.commentary import generate_commentary
 
 
 def get_connection():
@@ -121,27 +121,6 @@ def upsert_correlations(cur, corr_df: pd.DataFrame, company_ids: dict[str, int])
     return len(rows)
 
 
-def archive_correlation_snapshot(cur, corr_df: pd.DataFrame, company_ids: dict[str, int]):
-    """Copy today's computed correlations into correlation_history.
-    Idempotent — the UNIQUE constraint silently skips duplicate runs on the same day."""
-    today = date.today()
-    rows = []
-    for row in corr_df.itertuples():
-        cid1 = company_ids.get(row.symbol_1)
-        cid2 = company_ids.get(row.symbol_2)
-        if cid1 is None or cid2 is None:
-            continue
-        rows.append((cid1, cid2, row.period, float(row.corr_value), today))
-
-    if rows:
-        execute_values(
-            cur,
-            """INSERT INTO correlation_history
-               (company_id_1, company_id_2, period, corr_value, snapshot_date)
-               VALUES %s ON CONFLICT (company_id_1, company_id_2, period, snapshot_date) DO NOTHING""",
-            rows,
-        )
-
 
 def log_run(cur, status: str, rows_inserted: int, rows_skipped: int, tickers: list[str], duration_sec: float, error_msg: str = None):
     cur.execute(
@@ -220,23 +199,6 @@ def run(tickers=None):
         print(f"  correlations: {corr_count} upserted")
 
         conn.commit()
-
-        print("Archiving correlation snapshot...")
-        archive_correlation_snapshot(cur, corr_df, company_ids)
-        conn.commit()
-
-        print("Generating regime commentary...")
-        try:
-            commentary_result = generate_commentary(conn)
-            if commentary_result:
-                conn.commit()
-                snippet = commentary_result["commentary"][:80].replace("\n", " ")
-                print(f"  Commentary stored: {snippet}...")
-            else:
-                print("  Commentary skipped.")
-        except Exception as commentary_err:
-            print(f"  Commentary failed (non-fatal): {commentary_err}")
-            conn.rollback()
 
         duration = time.time() - start
         log_run(cur, "success", sp_inserted + corr_count, sp_skipped, tickers, duration)

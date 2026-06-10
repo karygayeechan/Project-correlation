@@ -385,7 +385,7 @@
     <div class="header">
       <div class="header-left">
         <h1>Stock Correlation Project</h1>
-        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations, runs bidirectional cointegration tests, generates rolling pairs-trading signals, backtests on a 4yr/1yr train-test split, persists results in PostgreSQL, surfaces them via a 6-tab Streamlit dashboard, and generates AI-powered regime commentary via Claude.</p>
+        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations, monitors macro regime indicators (10Y yield, TIPS, Nasdaq breadth, VIX, SMH/QQQ) with a 10-rule alert engine, runs bidirectional cointegration tests, generates rolling pairs-trading signals, backtests on a 4yr/1yr train-test split, persists results in PostgreSQL, and surfaces everything via a 6-tab Streamlit dashboard with on-demand AI regime commentary via Claude.</p>
         <div class="purpose-row">
           <div class="purpose">
             <div class="purpose-label">Purpose of the Analysis</div>
@@ -500,8 +500,8 @@
           <div class="step">
             <div class="step-icon" style="background:#1e3350;color:#f472b6">&#9733;</div>
             <div class="step-text">
-              <strong>AI Agent</strong>
-              <span>Compare vs 30-day baseline; generate plain-English regime commentary via Claude (≤100 words)</span>
+              <strong>Regime Agent</strong>
+              <span>Fetch 5 macro indicators (10Y yield, TIPS, NDX breadth, VIX, SMH/QQQ); evaluate 10 alert rules; on-demand ~100-word AI briefing via Claude</span>
             </div>
           </div>
           <div class="arrow">&#8595;</div>
@@ -510,7 +510,7 @@
             <div class="step-icon viz">&#9632;</div>
             <div class="step-text">
               <strong>Visualize</strong>
-              <span>FastAPI serves results; Streamlit renders 6-tab dashboard: Correlation (heatmap / rolling / network), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts, Manage Tickers</span>
+              <span>FastAPI serves results; Streamlit renders 6-tab dashboard: Correlation (heatmap / rolling / network), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts (macro indicators + AI commentary), Manage Tickers</span>
             </div>
           </div>
 
@@ -595,7 +595,7 @@
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
-            <span>etl/load.py — upsert prices, correlations, history &amp; etl_log</span>
+            <span>etl/load.py — upsert prices, correlations &amp; etl_log</span>
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
@@ -603,7 +603,15 @@
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
-            <span>agent/commentary.py — AI regime commentary via Claude API</span>
+            <span>Regime detection — data_collector.py (5 macro indicators via yfinance + FRED)</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>regime_alerts.py — 10 rules: yield crossovers, TIPS level/trend, NDX breadth zones, VIX trend, SMH/QQQ death cross</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>commentary.py — on-demand ~100-word AI regime briefing via Claude API</span>
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
@@ -636,6 +644,7 @@
           <div class="tech-pills">
             <span class="tech-pill py">Python 3.11</span>
             <span class="tech-pill py">yfinance</span>
+            <span class="tech-pill py">fredapi</span>
             <span class="tech-pill py">pandas</span>
             <span class="tech-pill db">PostgreSQL 16</span>
             <span class="tech-pill db">psycopg2</span>
@@ -660,8 +669,8 @@
         <span class="design-pill">Precomputed correlations</span>
         <span class="design-pill">Idempotent ETL</span>
         <span class="design-pill">Three-tier architecture</span>
-        <span class="design-pill">30-day commentary baseline</span>
-        <span class="design-pill">DB-cached AI alerts</span>
+        <span class="design-pill">Macro regime indicators</span>
+        <span class="design-pill">On-demand AI briefing</span>
         <span class="design-pill">Bidirectional Engle-Granger</span>
         <span class="design-pill">Rolling z-score signals</span>
         <span class="design-pill">4yr/1yr train-test backtest</span>

@@ -8,12 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Regime detection agent"))
 
 from app import db
 from etl.load import remove_ticker_from_db
 from etl.load import run as etl_run
 from etl.load import get_connection, get_active_tickers_from_db
-from agent.commentary import generate_commentary
+from commentary import generate_commentary
 
 # ─── App ─────────────────────────────────────────────────────────────────────
 
@@ -181,8 +182,7 @@ def get_or_generate_alert(end_date: date = Query(default=None)):
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Insufficient correlation history to generate an alert for {end_date}. "
-                   "Need a snapshot ≥ 30 days before that date.",
+            detail="ANTHROPIC_API_KEY is not set — cannot generate regime commentary.",
         )
     return result
 

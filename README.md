@@ -1,6 +1,6 @@
 # Stock Correlation Analysis
 
-Analyzes return correlations between tech stocks using a PostgreSQL database, automated ETL pipeline, Streamlit dashboard, AI commentary agent, statistical cointegration tests, and rolling pairs-trading signals.
+Analyzes return correlations between tech stocks and monitors macro market regimes using a PostgreSQL database, automated ETL pipeline, Streamlit dashboard, macro regime-detection agent, AI-written commentary, statistical cointegration tests, and rolling pairs-trading signals.
 
 ## What This Project Does
 
@@ -8,10 +8,11 @@ Analyzes return correlations between tech stocks using a PostgreSQL database, au
 2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over 1-month and 6-month windows
 3. **Loads** everything into PostgreSQL
 4. **Visualizes** correlations in a 6-tab Streamlit dashboard with interactive controls and ticker management
-5. **Generates AI commentary** — after each ETL run, an agent compares the latest correlations against a 30-day baseline and writes a plain-English regime summary via the Claude API
+5. **Monitors macro regime** — live indicator engine tracks 10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth (% above 200DMA), VIX trend, and SMH/QQQ relative strength across 10 alert rules with severity levels and recent-crossing detection
 6. **Cointegration testing** — ADF test on individual price series + bidirectional Engle-Granger test (both A→B and B→A) to determine if a pair shares a stable long-run relationship
 7. **Trading signals** — rolling 90-day hedge ratio, z-score spread signals (LONG/SHORT/EXIT), daily position sizing, and PnL tracking
 8. **Backtesting** — 4-year training warm-up + 1-year out-of-sample evaluation with performance, risk, stability, and scalability metrics
+9. **AI regime commentary** — on-demand ~100-word Claude briefing summarising live macro conditions and triggered alerts; one entry cached per calendar day in the database
 
 ---
 
@@ -25,8 +26,8 @@ Analyzes return correlations between tech stocks using a PostgreSQL database, au
 | `company_details` | 1:1 with companies | name, sector, industry, market cap |
 | `stock_prices` | 1:N with companies | daily OHLCV + adjusted close |
 | `correlations` | self-join on companies | latest pairwise Pearson correlation by period (upserted each run) |
-| `correlation_history` | self-join on companies | timestamped snapshot of every ETL run's correlation values |
-| `correlation_alerts` | standalone | AI-generated plain-English commentary comparing current vs. baseline |
+| `correlation_history` | self-join on companies | timestamped correlation snapshots — kept in schema, no longer written to by ETL |
+| `correlation_alerts` | standalone | AI-generated ~100-word macro regime briefings (one per calendar day) |
 | `etl_log` | standalone | one row per ETL run with status and row counts |
 
 ---
@@ -40,11 +41,13 @@ project_correlation/
 ├── etl/
 │   ├── extract.py                        # fetch raw 5-year OHLCV + metadata from yfinance
 │   ├── transform.py                      # reshape wide→long; compute 1m/6m Pearson correlations
-│   └── load.py                           # insert companies, prices, correlations; archive snapshot; run commentary agent
-├── agent/
-│   ├── __init__.py
-│   ├── commentary.py                     # AI commentary agent — compares correlation snapshots, calls Claude API
-│   └── AGENT.md                          # detailed breakdown of the agent implementation
+│   └── load.py                           # insert companies, prices, correlations; write etl_log
+├── Regime detection agent/
+│   ├── data_collector.py                 # fetch 5 macro indicators via yfinance + FRED
+│   ├── regime_alerts.py                  # 10 alert rules across 5 indicator families
+│   ├── commentary.py                     # on-demand AI regime briefing via Claude API
+│   ├── PLAN.md                           # indicator sources, alert rules, thresholds, architecture
+│   └── AGENT.md                          # legacy agent documentation
 ├── api/
 │   └── main.py                           # FastAPI backend — REST endpoints over the DB
 ├── app/
@@ -96,7 +99,7 @@ streamlit run app/streamlit_app.py
 - [x] Database schema (`db/schema.sql`) — 7 tables, indexes, constraints, `IF NOT EXISTS` for safe re-runs
 - [x] `etl/extract.py` — fetches 5 years of daily prices + company metadata from yfinance
 - [x] `etl/transform.py` — reshapes wide DataFrame to long format; `compute_correlations()` produces 1m/6m Pearson pairs
-- [x] `etl/load.py` — inserts companies, company_details, stock_prices (`ON CONFLICT DO NOTHING`); upserts correlations (`ON CONFLICT DO UPDATE`); archives snapshot to `correlation_history`; calls commentary agent; writes `etl_log` row on success or error; accepts dynamic ticker list
+- [x] `etl/load.py` — inserts companies, company_details, stock_prices (`ON CONFLICT DO NOTHING`); upserts correlations (`ON CONFLICT DO UPDATE`); writes `etl_log` row on success or error; accepts dynamic ticker list
 - [x] ETL logging — every pipeline run writes status, row counts, duration, and any error to `etl_log`
 - [x] Schema applied to PostgreSQL — all 7 tables and indexes created
 - [x] `app/db.py` — read-only query layer: tickers, stock prices, on-the-fly correlation matrices, rolling correlations, alerts, ETL log
@@ -104,9 +107,9 @@ streamlit run app/streamlit_app.py
 - [x] `app/api_client.py` — httpx client wrapping the API; mirrors `db.py` signatures so Streamlit needs no DB access
 - [x] `app/streamlit_app.py` — 6-tab dashboard (see Dashboard section below)
 - [x] Tickers finalized — NVDA, GOOGL, AVGO, ARM, TSM (dynamically extensible via Manage Tickers)
-- [x] `agent/commentary.py` — AI commentary agent comparing monthly correlation snapshots via Claude API
-- [x] `correlation_history` table — accumulates one snapshot per ETL day per pair; enables 30-day delta comparisons
-- [x] `correlation_alerts` table — stores generated commentary with current and baseline dates
+- [x] `Regime detection agent/data_collector.py` — fetches 10Y yield (yfinance `^TNX`), TIPS real yield (FRED `DFII10`), Nasdaq-100 breadth (computed across ~98 NDX components), VIX (`^VIX`), SMH/QQQ ratio + z-score
+- [x] `Regime detection agent/regime_alerts.py` — 10 alert rules: yield crossovers (50DMA, 200DMA, 20d ROC), TIPS level + trend + monthly rise, NDX breadth zones, VIX 20/100DMA, SMH/QQQ 100DMA + death cross
+- [x] `Regime detection agent/commentary.py` — on-demand ~100-word AI regime briefing via Claude; cached one per calendar day in `correlation_alerts`
 - [x] `Cointegration test/cointegration.py` — ADF on each series + **bidirectional** Engle-Granger (A→B and B→A); primary direction = lower p-value; both results shown on dashboard
 - [x] `Cointegration test/conclusions.py` — plain-English verdict strings
 - [x] `Trading signals/trading_signals.py` — rolling 90-day OLS hedge ratio, z-score signals, stateful positions with daily β refresh, daily PnL
@@ -127,7 +130,7 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 | **Cointegration** | Read | ADF test on each price series to confirm non-stationarity, then **bidirectional** Engle-Granger test (A→B and B→A). Primary direction = lower spread ADF p-value; both results shown with ★ badge. Pass/fail verdict with plain-English conclusions. Default pair: MSFT/META. |
 | **Trading Signals** | Read | Rolling 90-day pairs strategy for any two tickers. Computes hedge ratio β, spread z-score, and generates LONG/SHORT/EXIT signals. Shows current trade instruction, z-score chart, rolling β, and signal log. Hypothetical 5-year PnL section at bottom (cumulative PnL, Sharpe, max drawdown, win rate). Default pair: MSFT/META. |
 | **Backtest (4yr/1yr)** | Read | Out-of-sample evaluation: 4-year rolling warm-up + last 1 year as test slice. Five sections: Performance (Sharpe, Calmar, drawdown, win rate), Trading Activity (trade count, holding period, cost sensitivity), Risk (vol, VaR, CVaR, skew, kurtosis), Stability (rolling ADF, z-score histogram, β series, rolling half-life), Scalability (1×/2×/5× position size comparison). Default pair: MSFT/META. |
-| **Regime Alerts** | Read | Latest AI-generated commentary comparing correlations against a 30-day baseline. Only populated once ≥ 30 days of history exists. Full alert history table below the latest summary. |
+| **Regime Alerts** | Read | Two sections: **Macro Regime Indicators** — live 5-indicator dashboard with 10 color-coded alert rules (🔴 critical / 🟡 warning / 🟢 OK), expandable per-indicator blocks, and triggered-alerts summary table; **AI Regime Commentary** — on-demand ~100-word Claude briefing on rate environment, breadth, volatility, and sector momentum; last 5 days of history shown. |
 | **Manage Tickers** | Write | Add a ticker (fetches 5 years, triggers ETL for all current + new), remove a ticker (cascades deletes from all ticker-linked tables), or refresh all data. |
 
 ---
@@ -162,14 +165,14 @@ Using `uv` (recommended):
 ```bash
 uv venv --python 3.11
 source .venv/bin/activate
-uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic statsmodels
+uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic statsmodels fredapi
 ```
 
 Using standard `pip`:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic statsmodels
+pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv fastapi uvicorn httpx anthropic statsmodels fredapi
 ```
 
 ### 4. Configure environment variables
@@ -181,10 +184,11 @@ DB_PORT=5432
 DB_NAME=postgres
 DB_USER=<your_pg_user>
 DB_PASSWORD=<your_pg_password>
-ANTHROPIC_API_KEY=<your_api_key>
+ANTHROPIC_API_KEY=<your_api_key>   # needed for AI Regime Commentary button
+FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed for TIPS real yield
 ```
 
-`ANTHROPIC_API_KEY` is optional — the ETL and dashboard work without it. Regime alerts will simply be skipped until it is set.
+`ANTHROPIC_API_KEY` is optional — ETL and dashboard work without it; the Generate Commentary button will show an error if unset. `FRED_API_KEY` is required for the TIPS indicator; without it, `tips_10y` will be unavailable in the Regime Alerts tab.
 
 ### 5. Apply the database schema
 
@@ -226,6 +230,6 @@ Override with `API_URL=http://your-host:8000` if running on a different host.
 - **`adj_close` stored separately from `close`** — adjusted price accounts for splits/dividends and is used for return calculations; raw close reflects the actual traded price
 - **Dynamic ticker support** — `run(tickers=[...])` in `load.py` accepts any ticker list; the dashboard's Manage Tickers tab can add/remove tickers without touching code
 - **Three-tier architecture** — Streamlit (port 8501) → FastAPI (port 8000) → PostgreSQL (port 5432); `app/db.py` is used only by the API, never directly by the dashboard
-- **30-day minimum for commentary** — sub-month correlation comparisons are too noisy to interpret; the agent skips silently until a baseline snapshot ≥ 30 calendar days old exists in `correlation_history`
-- **Commentary failures are non-fatal** — if the Claude API call fails (network error, rate limit, missing key), the ETL rolls back only the alert INSERT and continues to completion; no price or correlation data is lost
-- **One snapshot per day** — `correlation_history` uses a `UNIQUE (company_id_1, company_id_2, period, snapshot_date)` constraint so re-running the ETL multiple times on the same day is idempotent
+- **Regime commentary is on-demand** — fetching ~100 NDX tickers for breadth takes 30–60s; running this on every ETL would be disruptive. Commentary is generated when the user clicks the button; one entry per calendar day is cached in `correlation_alerts`
+- **QQQ as trading-calendar anchor** — `^TNX` and `^VIX` (CBOE) trade on some days equities don't. The joint yfinance download is filtered to rows where QQQ is non-NaN, preventing NaN contamination of rolling window calculations
+- **`correlation_history` retained but dormant** — table exists in schema for backwards compatibility; ETL no longer writes to it

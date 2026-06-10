@@ -25,6 +25,10 @@ from trading_signals import fetch_prices as ts_fetch_prices, compute_rolling_sig
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Backtest"))
 from backtest import run_backtest, compute_all_metrics, get_split_dates
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Regime detection agent"))
+from data_collector import fetch_indicators
+from regime_alerts import detect_alerts
+
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Stock Correlation Dashboard",
@@ -69,6 +73,11 @@ def _alerts(limit: int = 20) -> pd.DataFrame:
 @st.cache_data(ttl=15, show_spinner=False)
 def _etl_log(limit: int = 50) -> pd.DataFrame:
     return db.get_etl_log(limit)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _regime_indicators(lookback_days: int = 365) -> pd.DataFrame:
+    return fetch_indicators(lookback_days)
 
 
 def _clear_and_rerun():
@@ -907,45 +916,153 @@ with tab_test:
 # ─── Tab 6: Regime Alerts ─────────────────────────────────────────────────────
 with tab_alerts:
     st.header("Regime Alerts & Commentary")
+
+    # ── Section 1: Macro Regime Indicators ───────────────────────────────────
+    st.subheader("Macro Regime Indicators")
     st.caption(
-        "Compares correlations at the sidebar end date against a baseline ~30 days prior. "
-        "Requires ≥ 30 days of correlation history — sub-month comparisons are too noisy to interpret."
+        "Live macro indicators — 10Y yield, real yields (TIPS), Nasdaq-100 breadth, VIX trend, "
+        "and SMH/QQQ relative strength. Cached for 1 hour; click Refresh to force a reload."
+    )
+
+    ref_col, _ = st.columns([1, 5])
+    with ref_col:
+        if st.button("Refresh", key="refresh_regime_btn"):
+            st.cache_data.clear()
+            st.rerun()
+
+    ind_df = None
+    regime_alert_list = []
+    with st.spinner("Fetching macro indicators — first load downloads ~100 tickers and may take ~30s…"):
+        try:
+            ind_df = _regime_indicators()
+            regime_alert_list = detect_alerts(ind_df)
+        except Exception as _exc:
+            st.error(f"Failed to fetch macro indicators: {_exc}")
+
+    if ind_df is not None and not ind_df.empty:
+        latest = ind_df.dropna(how="all").iloc[-1]
+        as_of  = ind_df.dropna(how="all").index[-1].date()
+
+        # ── Snapshot row ──────────────────────────────────────────────────
+        st.caption(f"As of {as_of}")
+        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+
+        ty_val   = latest.get("treasury_10y")
+        tips_val = latest.get("tips_10y")
+        br_val   = latest.get("nasdaq_breadth")
+        vix_val  = latest.get("vix")
+        ratio_val = latest.get("smh_qqq_ratio")
+
+        sc1.metric("10Y Yield",    f"{ty_val:.3f}%"  if ty_val   is not None and not pd.isna(ty_val)   else "N/A")
+        sc2.metric("TIPS Yield",   f"{tips_val:.2f}%" if tips_val is not None and not pd.isna(tips_val) else "N/A")
+        sc3.metric("NDX Breadth",  f"{br_val:.1f}%"  if br_val   is not None and not pd.isna(br_val)   else "N/A")
+        sc4.metric("VIX",          f"{vix_val:.1f}"  if vix_val  is not None and not pd.isna(vix_val)  else "N/A")
+        sc5.metric("SMH/QQQ",      f"{ratio_val:.4f}" if ratio_val is not None and not pd.isna(ratio_val) else "N/A")
+
+        st.markdown("---")
+
+        # ── Alert rules grouped by indicator ─────────────────────────────
+        _INDICATOR_ORDER = [
+            "10Y Treasury Yield",
+            "10Y TIPS Real Yield",
+            "Nasdaq-100 Breadth",
+            "VIX Trend",
+            "SMH/QQQ Relative Strength",
+        ]
+
+        from collections import defaultdict
+        by_indicator = defaultdict(list)
+        for a in regime_alert_list:
+            by_indicator[a["indicator"]].append(a)
+
+        _SEV_ICON = {"critical": "🔴", "warning": "🟡", "info": "🟢"}
+
+        for ind_name in _INDICATOR_ORDER:
+            rules = by_indicator.get(ind_name, [])
+            if not rules:
+                continue
+
+            # Header: red dot if any critical/warning triggered
+            any_triggered = any(r["triggered"] for r in rules)
+            any_critical  = any(r["triggered"] and r["severity"] == "critical" for r in rules)
+            any_warning   = any(r["triggered"] and r["severity"] == "warning" for r in rules)
+            header_icon = "🔴" if any_critical else ("🟡" if any_warning else "🟢")
+            header_label = " — ⚡ ALERT" if any_triggered else " — OK"
+
+            with st.expander(f"{header_icon} **{ind_name}**{header_label}", expanded=any_triggered):
+                for rule in rules:
+                    icon = _SEV_ICON.get(rule["severity"], "⚪")
+                    cross_tag = " *(recently crossed)*" if rule["recently_crossed"] else ""
+
+                    if rule["triggered"] and rule["severity"] == "critical":
+                        st.error(f"{icon} **{rule['rule']}** — {rule['message']}{cross_tag}")
+                    elif rule["triggered"] and rule["severity"] == "warning":
+                        st.warning(f"{icon} **{rule['rule']}** — {rule['message']}{cross_tag}")
+                    else:
+                        st.success(f"{icon} **{rule['rule']}** — {rule['message']}")
+
+        # ── Triggered-only summary table ──────────────────────────────────
+        triggered_rules = [r for r in regime_alert_list if r["triggered"]]
+        if triggered_rules:
+            st.markdown("---")
+            st.subheader("Active Alerts Summary")
+            summary_rows = []
+            for r in triggered_rules:
+                summary_rows.append({
+                    "Indicator": r["indicator"],
+                    "Rule": r["rule"],
+                    "Severity": r["severity"].upper(),
+                    "New Cross": "Yes" if r["recently_crossed"] else "No",
+                    "Details": r["message"],
+                })
+            st.dataframe(
+                pd.DataFrame(summary_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No macro regime alerts currently triggered.")
+
+    st.markdown("---")
+
+    # ── Section 2: AI Regime Commentary ──────────────────────────────────────
+    st.subheader("AI Regime Commentary")
+    st.caption(
+        "Claude writes a ~100-word briefing based on the current macro indicators and triggered alerts above. "
+        "One commentary is stored per day — clicking Generate re-uses today's if it already exists."
     )
 
     alert = _alert_for_date(end_date)
 
     if alert and alert.get("commentary"):
-        al1, al2 = st.columns([3, 1])
+        al1, al2 = st.columns([4, 1])
         with al1:
-            st.markdown(f"{alert['commentary']}")
+            st.markdown(alert["commentary"])
         with al2:
-            st.metric("Analysis date", str(alert["corr_date"]))
-            st.metric("Baseline date", str(alert["baseline_date"]))
+            st.metric("Generated for", str(alert["corr_date"]))
     else:
         st.info(
-            f"No alert stored for **{end_date}**. "
-            "Click below to generate one — this calls Claude and takes a few seconds."
+            f"No commentary stored for **{end_date}**. "
+            "Click below — Claude will analyse the live macro indicators and write a briefing. "
+            "First run fetches ~100 tickers and takes ~30–60 s."
         )
-        if st.button("Generate Alert for this date", type="primary", key="gen_alert_btn"):
-            with st.spinner("Analysing correlations via Claude..."):
+        if st.button("Generate Regime Commentary", type="primary", key="gen_alert_btn"):
+            with st.spinner("Fetching indicators and generating commentary via Claude…"):
                 try:
                     result = db.generate_alert_for_date(end_date)
                     if result:
                         _clear_and_rerun()
                     else:
-                        st.error(
-                            f"Not enough correlation history for {end_date}. "
-                            "Need a snapshot ≥ 30 days before that date in correlation_history."
-                        )
+                        st.error("ANTHROPIC_API_KEY is not set — cannot generate commentary.")
                 except Exception as exc:
                     st.error(f"Generation failed: {exc}")
 
-    alerts_df = _alerts(20)
+    alerts_df = _alerts(5)
     if not alerts_df.empty:
         st.markdown("---")
-        st.subheader("Alert History")
-        history = alerts_df[["generated_at", "corr_date", "baseline_date", "commentary"]].copy()
-        history.columns = ["Generated At", "Analysis Date", "Baseline Date", "Commentary"]
+        st.subheader("Commentary History (last 5 days)")
+        history = alerts_df[["generated_at", "corr_date", "commentary"]].copy()
+        history.columns = ["Generated At", "Date", "Commentary"]
         st.dataframe(history, use_container_width=True, hide_index=True)
 
 # ─── Tab 8: Manage Tickers ───────────────────────────────────────────────────

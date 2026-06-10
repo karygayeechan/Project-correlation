@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations, stores results in PostgreSQL, visualizes via Streamlit, generates AI-written regime commentary via the Claude API, and runs statistical cointegration tests and rolling pairs-trading signals.
+Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations, stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, and runs statistical cointegration tests and rolling pairs-trading signals.
 
 ## Environment Setup
 
@@ -20,7 +20,7 @@ psql -d postgres -f db/schema.sql
 ```bash
 uv venv --python 3.11
 source .venv/bin/activate
-uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv statsmodels
+uv pip install yfinance pandas psycopg2-binary streamlit plotly python-dotenv statsmodels fredapi
 ```
 
 ### Required env vars
@@ -31,7 +31,8 @@ DB_PORT=5432
 DB_NAME=postgres
 DB_USER=<your_pg_user>
 DB_PASSWORD=<your_pg_password>
-ANTHROPIC_API_KEY=<your_api_key>   # optional — ETL works without it; needed for Regime Alerts
+ANTHROPIC_API_KEY=<your_api_key>   # optional — needed for AI Regime Commentary button
+FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed for TIPS real yield
 ```
 
 ## Commands
@@ -50,10 +51,13 @@ ANTHROPIC_API_KEY=<your_api_key>   # optional — ETL works without it; needed f
 **ETL pipeline:**
 - `etl/extract.py` — fetches 5 years OHLCV for NVDA, GOOGL, AVGO, ARM, TSM via yfinance
 - `etl/transform.py` — reshapes wide → long; `compute_correlations()` produces 1m/6m Pearson pairs
-- `etl/load.py` — inserts companies, prices, upserts correlations, archives snapshot, runs commentary agent, writes etl_log
+- `etl/load.py` — inserts companies, prices, upserts correlations, writes etl_log (no longer archives snapshots or calls commentary agent)
 
-**Agent:**
-- `agent/commentary.py` — compares latest correlations against 30-day baseline, calls Claude API, stores result in `correlation_alerts`
+**Regime Detection Agent (`Regime detection agent/`):**
+- `data_collector.py` — fetches 5 macro indicators via yfinance + FRED; entry point `fetch_indicators(lookback_days=365)` returns a tidy DataFrame with columns: `treasury_10y`, `tips_10y`, `nasdaq_breadth`, `vix`, `smh_qqq_ratio`, `smh_qqq_zscore`
+- `regime_alerts.py` — evaluates 10 alert rules across 5 indicator families; entry point `detect_alerts(df)` returns a list of alert dicts with `triggered`, `recently_crossed`, `severity`, `message`
+- `commentary.py` — on-demand agent: fetches indicators, evaluates alerts, calls Claude to write a ~100-word macro regime briefing, stores in `correlation_alerts`
+- `PLAN.md` — indicator sources, all alert rules with thresholds, architecture decisions
 
 **API:**
 - `api/main.py` — FastAPI backend with 10 endpoints; `app/db.py` is the query layer
@@ -76,16 +80,18 @@ ANTHROPIC_API_KEY=<your_api_key>   # optional — ETL works without it; needed f
 - `Backtest instruction` — original specification for the backtest tab
 
 **Database:**
-- 7 tables: `companies`, `company_details`, `stock_prices`, `correlations`, `correlation_history`, `correlation_alerts`, `etl_log`
+- 7 tables: `companies`, `company_details`, `stock_prices`, `correlations`, `correlation_history` (kept in schema, no longer written to by ETL), `correlation_alerts` (stores regime commentary), `etl_log`
 
 ## Architecture Decisions
 
 - **Surrogate SERIAL keys** for companies — ticker symbols can change (FB→META); integer PKs are stable
 - **Precomputed correlations** stored in `correlations` table — avoids recomputing on every Streamlit render
 - **Idempotent ETL** — all inserts use `ON CONFLICT DO NOTHING`; safe to re-run
-- **`correlation_history` snapshots** — one row per pair/period/day; enables 30-day delta comparisons for the commentary agent without touching the live `correlations` table
-- **30-day commentary minimum** — sub-month correlation deltas are too noisy; the agent skips silently until a baseline snapshot ≥ 30 calendar days old exists
-- **Commentary is non-fatal** — Claude API failure rolls back only the alert INSERT; prices and correlations are already committed and unaffected
+- **Regime commentary is on-demand, not ETL-triggered** — fetching 100+ tickers for NDX breadth takes ~30–60s; running that on every ETL would be prohibitive. Commentary is generated when the user clicks the button in Streamlit; one entry per calendar day is cached in `correlation_alerts`.
+- **QQQ as trading-calendar reference** — `^TNX` and `^VIX` trade on CBOE holidays when equities are closed. Filtering `close[close["QQQ"].notna()]` removes those extra rows before any rolling window calculations, preventing NaN contamination of the 200DMA and z-score.
+- **DMA_BUFFER = 400 calendar days** — the 252-day SMH/QQQ z-score needs 252 trading days of warmup. 400 calendar days ≈ 276 trading days, enough to keep the z-score valid across the entire 1-year display window.
+- **State-based + crossing alerts** — each rule reports both current state (`triggered`) and whether it changed within the last 5 trading days (`recently_crossed`). This distinguishes a new actionable signal from a condition that has been true for weeks.
+- **`correlation_history` retained in schema** — table is kept for backwards compatibility but ETL no longer writes to it; the regime agent does not use correlation snapshots.
 
 ## Git Workflow
 
@@ -109,6 +115,9 @@ Files to keep in sync:
 - **Hardcoded tickers**: `TICKERS` list is duplicated in both extract.py and transform.py — keep them in sync.
 - **Correlation windows**: "1m" ≈ 21 trading days, "6m" ≈ 126 trading days. Sort by date before computing daily returns.
 - **No test suite** — use each module's `if __name__ == "__main__"` block to smoke-test during development.
-- **Cointegration / Trading Signals / Backtest modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, and `Backtest/` are added to `sys.path` at the top of `streamlit_app.py` — if you move them, update those `sys.path.insert` calls.
+- **Cointegration / Trading Signals / Backtest / Regime Detection modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, `Backtest/`, and `Regime detection agent/` are added to `sys.path` at the top of `streamlit_app.py` and `api/main.py` — if you move them, update those `sys.path.insert` calls.
 - **Trading Signals uses `st.session_state`**: results from the Trading Signals tab are stored under `st.session_state["ts_df"]` so the Daily PnL tab can read them without recomputing. If the user navigates to Daily PnL before running signals, they see a prompt to compute first.
 - **Decimal types from DB**: `psycopg2` returns `decimal.Decimal` for numeric columns — always cast to `float` before passing to numpy/statsmodels.
+- **FRED API 1-day lag**: FRED publishes TIPS yield (`DFII10`) with a 1-business-day delay. The most recent row in `tips_10y` is frequently NaN — this is expected; the dashboard displays "N/A" for that cell.
+- **Regime indicator cache TTL = 1 hour**: `_regime_indicators()` in Streamlit is cached for 3600s. First load takes ~30–60s (100+ tickers + FRED). The Refresh button calls `st.cache_data.clear()` to force a reload.
+- **NDX-100 component list is hardcoded** in `data_collector.py` — update it when the index rebalances quarterly. Delisted tickers (e.g. WBA, ANSS) cause yfinance warnings but do not break the breadth computation; they are simply excluded from the count.
