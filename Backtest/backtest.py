@@ -28,8 +28,14 @@ def get_split_dates():
 
 def run_backtest(sym_a: str, sym_b: str, window: int = 90):
     """
-    Fetch 5y of prices, run rolling signals on full history (warm-up = 4y training
-    period), then slice out the test period (most recent 1y) for evaluation.
+    Fetch 5y of prices, run quarterly-fixed-β signals on full history, then slice
+    out the test period (most recent 1y) for evaluation.
+
+    β is estimated from a trailing 1-year OLS refreshed at each calendar-quarter
+    boundary (see compute_rolling_signals). `window` controls only the z-score
+    rolling mean/std (60–120 days, default 90). The 4-year training period warms up
+    the β estimation so every quarter in the test window has a fully calibrated β.
+
     Returns (full_df, test_df). DB is not modified.
     """
     series_a, series_b = fetch_prices(sym_a, sym_b)

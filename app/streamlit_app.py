@@ -220,11 +220,11 @@ with tab_corr:
         else:
             c1, c2, c3 = st.columns(3)
             with c1:
-                rc_default_a = "MSFT" if "MSFT" in selected else selected[0]
+                rc_default_a = "ARM" if "ARM" in selected else selected[0]
                 rc_sym1 = st.selectbox("Ticker 1", selected, index=selected.index(rc_default_a), key="rc_sym1")
             with c2:
                 other = [t for t in selected if t != rc_sym1]
-                rc_default_b = "META" if "META" in other else other[0]
+                rc_default_b = "TSM" if "TSM" in other else other[0]
                 rc_sym2 = st.selectbox("Ticker 2", other or selected, index=(other or selected).index(rc_default_b) if rc_default_b in (other or selected) else 0, key="rc_sym2")
             with c3:
                 window_label = st.selectbox(
@@ -343,12 +343,13 @@ with tab_coint:
     st.header("Cointegration Test")
     st.caption(
         "Tests whether two non-stationary price series share a stable long-run relationship. "
-        "Uses 5-year daily adj_close prices from the DB."
+        "The past year is split into 4 quarterly windows. Each quarter produces its own "
+        "Engle-Granger p-value — 4 p-values in total, one per quarter."
     )
 
     db_tickers_coint = _tickers()
-    default_a = "MSFT" if "MSFT" in db_tickers_coint else db_tickers_coint[0]
-    default_b = "META" if "META" in db_tickers_coint else db_tickers_coint[1]
+    default_a = "ARM" if "ARM" in db_tickers_coint else db_tickers_coint[0]
+    default_b = "TSM" if "TSM" in db_tickers_coint else db_tickers_coint[1]
 
     ca1, ca2 = st.columns(2)
     with ca1:
@@ -450,19 +451,40 @@ with tab_coint:
 
             st.markdown("---")
 
-            # ── Section 3: Final Verdict ──────────────────────────────────────
-            st.subheader("Final Verdict")
-            st.caption(f"Based on primary direction: `{cr['eg_direction']}` (p={cr['eg']['p_value']:.4f})")
-            criteria = [
-                (f"ADF on {coint_sym_a}: p > 0.05 (non-stationary)", not cr["adf_a"]["is_stationary"]),
-                (f"ADF on {coint_sym_b}: p > 0.05 (non-stationary)", not cr["adf_b"]["is_stationary"]),
-                (f"Engle-Granger [{cr['eg_direction']}]: p < 0.05 (stationary spread)", cr["eg"]["is_cointegrated"]),
-            ]
-            for label, passed in criteria:
-                icon = "✓" if passed else "✗"
-                color = "green" if passed else "red"
-                st.markdown(f":{color}[{icon}] {label}")
+            # ── Section 3: Quarterly P-Values ─────────────────────────────────
+            st.subheader("Quarterly Cointegration P-Values — Past 1 Year")
+            st.caption(
+                "The past year is split into 4 equal quarters (Q1 = oldest, Q4 = most recent). "
+                "Each quarter runs Engle-Granger in both directions; the primary p-value is the "
+                "lower of the two. Pass condition: p < 0.05 (spread is stationary → cointegrated)."
+            )
 
+            q_cols = st.columns(4)
+            for col, q in zip(q_cols, cr["quarters"]):
+                with col:
+                    with st.container(border=True):
+                        start_str = q["start_date"].strftime("%b %d %Y")
+                        end_str   = q["end_date"].strftime("%b %d %Y")
+                        st.markdown(f"**{q['label']}**")
+                        st.caption(f"{start_str} → {end_str}")
+                        st.metric(
+                            "EG p-value",
+                            f"{q['primary_p']:.4f}",
+                            help=f"Primary direction: {q['primary_direction']}",
+                        )
+                        # Both directions
+                        st.caption(
+                            f"{coint_sym_a}→{coint_sym_b}: p={q['eg_ab']['p_value']:.4f}  "
+                            f"{coint_sym_b}→{coint_sym_a}: p={q['eg_ba']['p_value']:.4f}"
+                        )
+                        if q["passes"]:
+                            st.success("Cointegrated ✓")
+                        else:
+                            st.error("Not cointegrated ✗")
+
+            st.markdown("---")
+            st.subheader("Final Verdict")
+            st.caption(f"{cr['quarters_passing']}/4 quarters passed the cointegration test.")
             pair_conc = pair_conclusion(cr["pair_passes"])
             if cr["pair_passes"]:
                 st.success(f"✓ {pair_conc}")
@@ -471,17 +493,19 @@ with tab_coint:
 
 # ─── Tab 4: Trading Signals ───────────────────────────────────────────────────
 with tab_signals:
-    st.header("Trading Signals — Rolling Pairs Strategy")
+    st.header("Trading Signals — Quarterly β Pairs Strategy")
     st.caption(
-        "Rolling 90-day hedge ratio + z-score strategy. "
+        "Quarterly-fixed hedge ratio strategy: β is estimated from a trailing 1-year OLS "
+        "and refreshed at each calendar-quarter boundary — fixed for the full quarter. "
+        "Z-score uses a 60–120 day rolling mean/std. "
         "Best applied to pairs that pass the Cointegration Test. "
         "Signals: z < −2 → LONG spread, z > 2 → SHORT spread, |z| < 0.5 → EXIT."
     )
 
     ts_tickers = _tickers()
-    ts_default_a = "MSFT" if "MSFT" in ts_tickers else ts_tickers[0]
+    ts_default_a = "ARM" if "ARM" in ts_tickers else ts_tickers[0]
     ts_others = [t for t in ts_tickers if t != ts_default_a]
-    ts_default_b = "META" if "META" in ts_others else ts_others[0]
+    ts_default_b = "TSM" if "TSM" in ts_others else ts_others[0]
 
     tsc1, tsc2, tsc3 = st.columns([2, 2, 1])
     with tsc1:
@@ -492,7 +516,9 @@ with tab_signals:
                                 index=ts_b_opts.index(ts_default_b) if ts_default_b in ts_b_opts else 0,
                                 key="ts_b")
     with tsc3:
-        ts_window = st.number_input("Window (days)", min_value=30, max_value=252, value=90, step=10, key="ts_win")
+        ts_window = st.number_input("Z-score window (days)", min_value=60, max_value=120, value=90, step=10,
+                                    help="Rolling window for z-score mean/std (60–120 days). β is always estimated from a trailing 1-year OLS, fixed per calendar quarter.",
+                                    key="ts_win")
 
     ts_run = st.button("Compute Signals", type="primary", key="ts_run")
 
@@ -531,8 +557,10 @@ with tab_signals:
         cs3.metric(f"β ({sym_a_lbl}/{sym_b_lbl})", f"{cur_beta:.4f}")
         cs4.metric("Position A", f"{latest['position_a']:+.0f} unit")
         st.markdown(f"**Trade:** :{sig_color}[{translation}]")
-        st.caption(f"Position B size = {abs(latest['position_b']):.4f} units of {sym_b_lbl} "
-                   f"(updated daily: position_B = β_t × |position_A|)")
+        cur_quarter = latest["quarter"] if "quarter" in latest.index else "—"
+        st.caption(f"Quarter: {cur_quarter}  |  β is fixed for this quarter (estimated from trailing 1-year OLS).  "
+                   f"Position B = {abs(latest['position_b']):.4f} units of {sym_b_lbl}  "
+                   f"(position_B = β_q × |position_A|)")
 
         st.markdown("---")
 
@@ -564,14 +592,17 @@ with tab_signals:
                             legend=dict(orientation="h", y=-0.15))
         st.plotly_chart(fig_z, use_container_width=True)
 
-        # ── Rolling β chart ─────────────────────────────────────────────────
-        st.subheader("Rolling Hedge Ratio β")
+        # ── Quarterly β chart ────────────────────────────────────────────────
+        st.subheader("Quarterly Fixed Hedge Ratio β")
+        st.caption("β is estimated once per calendar quarter from a trailing 1-year OLS — "
+                   "the step-function shape shows each quarterly update.")
         fig_b = go.Figure()
         fig_b.add_trace(go.Scatter(
             x=valid.index, y=valid["beta"],
-            mode="lines", name="β_t",
-            line=dict(color="#7B1FA2", width=1.5),
+            mode="lines", name="β (quarterly fixed)",
+            line=dict(color="#7B1FA2", width=2, shape="hv"),
         ))
+        fig_b.add_hline(y=0, line=dict(color="#aaa", dash="dot", width=1))
         fig_b.update_layout(height=260, margin=dict(t=10), yaxis_title="β",
                             hovermode="x unified")
         st.plotly_chart(fig_b, use_container_width=True)
@@ -580,10 +611,10 @@ with tab_signals:
         st.subheader("Recent Signal Log")
         recent = valid.tail(30).copy()
         recent["translation"] = recent.apply(lambda r: signal_translation(r, sym_a_lbl, sym_b_lbl), axis=1)
-        display_cols = ["z_score", "signal", "beta", "position_a", "position_b", "translation"]
+        display_cols = ["quarter", "z_score", "signal", "beta", "position_a", "position_b", "translation"]
         st.dataframe(
             recent[display_cols].rename(columns={
-                "z_score": "Z-Score", "signal": "Signal", "beta": "β",
+                "quarter": "Quarter", "z_score": "Z-Score", "signal": "Signal", "beta": "β (fixed)",
                 "position_a": f"Pos {sym_a_lbl}", "position_b": f"Pos {sym_b_lbl}",
                 "translation": "Trade Instruction",
             }).iloc[::-1],
@@ -656,15 +687,16 @@ with tab_test:
     st.header("Strategy Backtest")
     train_start, train_end, test_start, test_end = get_split_dates()
     st.caption(
-        f"**Train:** {train_start} → {train_end} (4 years, used to warm up rolling models)  |  "
+        f"**Train:** {train_start} → {train_end} (4 years, warms up quarterly β estimation)  |  "
         f"**Test:** {test_start} → {test_end} (most recent 1 year, evaluation only). "
+        "β is estimated from a trailing 1-year OLS, fixed per calendar quarter. "
         "No DB writes. Results are fully in-memory."
     )
 
     bt_tickers = _tickers()
-    bt_default_a = "MSFT" if "MSFT" in bt_tickers else bt_tickers[0]
+    bt_default_a = "ARM" if "ARM" in bt_tickers else bt_tickers[0]
     bt_others = [t for t in bt_tickers if t != bt_default_a]
-    bt_default_b = "META" if "META" in bt_others else bt_others[0]
+    bt_default_b = "TSM" if "TSM" in bt_others else bt_others[0]
 
     btc1, btc2, btc3 = st.columns([2, 2, 1])
     with btc1:
@@ -675,7 +707,9 @@ with tab_test:
                                 index=bt_b_opts.index(bt_default_b) if bt_default_b in bt_b_opts else 0,
                                 key="bt_b")
     with btc3:
-        bt_window = st.number_input("Window (days)", min_value=30, max_value=252, value=90, step=10, key="bt_win")
+        bt_window = st.number_input("Z-score window (days)", min_value=60, max_value=120, value=90, step=10,
+                                    help="Rolling window for z-score mean/std (60–120 days). β is always from trailing 1-year OLS, fixed per quarter.",
+                                    key="bt_win")
 
     if st.button("Run Backtest", type="primary", key="bt_run"):
         with st.spinner(f"Running backtest for {bt_sym_a} / {bt_sym_b}…"):
@@ -852,15 +886,18 @@ with tab_test:
         stab3, stab4 = st.columns(2)
 
         with stab3:
-            # Hedge ratio β
+            # Quarterly-fixed hedge ratio β
             beta_s = m["beta_series"]
             fig_beta = go.Figure()
             fig_beta.add_trace(go.Scatter(x=beta_s.index, y=beta_s.values, mode="lines",
-                                          name="β", line=dict(color="#F57C00", width=1.5)))
-            fig_beta.update_layout(title="Hedge Ratio β (test period)", height=260,
-                                   margin=dict(t=40), yaxis_title="β")
+                                          name="β (quarterly fixed)",
+                                          line=dict(color="#F57C00", width=2, shape="hv")))
+            fig_beta.add_hline(y=0, line=dict(color="#aaa", dash="dot", width=1))
+            fig_beta.update_layout(title="Quarterly Fixed Hedge Ratio β (test period)",
+                                   height=260, margin=dict(t=40), yaxis_title="β")
             st.plotly_chart(fig_beta, use_container_width=True)
-            st.caption(f"Std dev of β: {float(beta_s.std()):.4f}")
+            n_beta_changes = int((beta_s != beta_s.shift(1)).sum()) - 1
+            st.caption(f"β updated {n_beta_changes} time(s) during test period  |  Std dev: {float(beta_s.std()):.4f}")
 
         with stab4:
             # Rolling half-life

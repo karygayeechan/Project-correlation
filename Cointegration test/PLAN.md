@@ -2,8 +2,10 @@
 
 ## Goal
 Add a "Cointegration Test" tab to the Streamlit dashboard (between Rolling Correlation
-and Price & Returns) that runs two statistical tests on any chosen pair of stocks using
-5-year price data, following the exact procedure in "Cointegration test instruction".
+and Price & Returns) that runs cointegration tests on any chosen pair of stocks.
+The past year of daily data is split into **4 equal quarterly windows**. Each quarter
+produces its own Engle-Granger p-value — 4 p-values in total, one per quarter — each
+with a pass/fail indicator. Follows the procedure in "Cointegration test instruction".
 
 ---
 
@@ -20,8 +22,8 @@ Pure computation module. No Streamlit imports.
 ```
 fetch_prices(sym_a, sym_b) -> (pd.Series, pd.Series)
 ```
-- Pulls 5-year adj_close from DB for both symbols via psycopg2 (same pattern as app/db.py)
-- Returns two aligned price Series indexed by date
+- Pulls the latest **1-year** adj_close from DB for both symbols via psycopg2 (same pattern as app/db.py)
+- Returns two aligned price Series indexed by date (~252 trading days total, ~63 per quarter)
 
 ```
 run_adf(series, label) -> dict
@@ -43,15 +45,17 @@ run_engle_granger(series_a, series_b) -> dict
 ```
 run_all(sym_a, sym_b) -> dict
 ```
-- Calls all three functions above
-- Runs Engle-Granger in **both directions** (A→B and B→A) because EG is not symmetric — different regression orderings produce different residuals and can flip the verdict
-- Primary direction = whichever ordering gives the lower spread ADF p-value (stronger cointegration signal)
-- Evaluates final pass condition using the primary direction:
-    1. ADF on A: p > 0.05  ✓
-    2. ADF on B: p > 0.05  ✓
-    3. Engle-Granger residual ADF (primary direction): p < 0.05  ✓
-- Returns full results dict including `pair_passes: bool`, `eg` (primary), `eg_direction`, `eg_reverse`, `eg_reverse_direction`
-- Dashboard shows both directions with primary starred (★) and reverse in purple
+- Fetches the latest 1 year of data and splits into **4 equal quarterly windows** (Q1 = oldest, Q4 = most recent, ~63 trading days each)
+- For each quarter, runs EG in both directions (A→B and B→A); primary p-value = lower of the two
+- Returns `quarters`: list of 4 dicts, each containing:
+    - `label` (Q1–Q4), `start_date`, `end_date`, `n_obs`
+    - `eg_ab`, `eg_ba` — full EG result dicts for both directions
+    - `primary_p`, `primary_direction` — the headline p-value and which direction it came from
+    - `passes` — True if primary_p < 0.05
+- Also runs ADF on the full-year series (`adf_a`, `adf_b`) as a prerequisite check
+- Also runs full-year EG for the spread charts in the detail section
+- `pair_passes = True` only when **all 4 quarters** pass (primary_p < 0.05)
+- `quarters_passing` — integer count of passing quarters (0–4)
 
 ---
 
@@ -104,10 +108,14 @@ Layout:
    - Verdict badge: st.success (✓ cointegrated) or st.error (✗ not cointegrated)
    - Conclusion sentence from conclusions.py
 
-   **Section 3 — Final Verdict**
-   - Checklist of all 4 criteria with ✓/✗ per criterion
-   - st.success (green banner) if pair_passes, st.error (red banner) if not
-   - Conclusion sentence from conclusions.py
+   **Section 3 — Quarterly Cointegration P-Values**
+   - Four side-by-side cards, one per quarter (Q1 = oldest, Q4 = most recent)
+   - Each card shows:
+     - Quarter label and date range (e.g. "Sep 14 2024 → Dec 13 2024")
+     - Primary EG p-value (lower of the two directions) as the headline metric
+     - Both individual direction p-values as caption (A→B and B→A)
+     - st.success "Cointegrated ✓" if primary_p < 0.05, else st.error "Not cointegrated ✗"
+   - Below the cards: "X/4 quarters passed" summary and final PASS/FAIL banner
 
 ---
 

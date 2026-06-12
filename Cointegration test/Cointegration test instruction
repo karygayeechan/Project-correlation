@@ -1,19 +1,42 @@
-1. first run ADF test Tests and conclude Is this series stationary?
+1. First run ADF tests and conclude: Is this series stationary?
 
-Stationary means: constant mean; constant variance; doesn't wander indefinitely
+Stationary means: constant mean; constant variance; doesn't wander indefinitely.
 
-First, You run ADF twice: for both stock A and stock B. give me the results of these two ADF separately.
-interpretation of ADF test: p<0.05 = stationary ; p>0.05 = non-stationary. if they are non-stationary please give it a check mark; if they are stationary please give it a question mark.
+Run ADF twice — once for stock A and once for stock B — on the full 1-year price series.
+Interpretation: p < 0.05 = stationary; p > 0.05 = non-stationary.
+If non-stationary: give it a check mark ✓ (this is required for cointegration).
+If stationary: give it a question mark ? (unexpected for raw prices).
 
 
-2. second, run Engle-Granger test Tests: Are these two non-stationary series cointegrated?
+2. Second, run the Engle-Granger cointegration test per quarter.
 
-Procedure:
-   1) Regress A on B
-   2) Compute residuals based on  ϵ​=A−(α+βB​)
-   3) Run ADF on residuals (include the step of calculating hedge ratio β (how many units of stock B do i need to match 1 unit of A); creating residuals and run ADF)
+The past 1 year of daily price data is divided into 4 equal quarterly windows:
+  Q1 = oldest quarter, Q2, Q3, Q4 = most recent quarter (~63 trading days each).
 
-If residuals are stationary: pair is cointegrated 
-p<0.05 = cointegrated (spread is stationary); p>0.05 = not cointegrated (spread is not stationary)
+For each quarter, run Engle-Granger in BOTH directions:
 
-Finally, if the pair satisfies all these criteria, give the pair a checkmark (pair passes): 1) ADF on stock A: p>0.05; 2) ADF on stock B: p>0.05; 3) Engle-Granger: p<0.05; 4) ADF on spread: p<0.05
+Direction A→B:
+   1) Regress A on B: compute α and β (hedge ratio — how many units of B match 1 unit of A)
+   2) Compute residuals: ϵ = A − (α + β·B)
+   3) Run ADF on residuals
+   Interpretation: p < 0.05 = cointegrated (spread is stationary); p > 0.05 = not cointegrated
+
+Direction B→A:
+   Same procedure with A and B swapped.
+
+Primary p-value for each quarter = the lower of the two direction p-values (stronger signal).
+Pass condition per quarter: primary p-value < 0.05.
+
+
+3. Output: 4 p-values, one per quarter
+
+Report exactly four headline p-values — one per quarterly window:
+   Q1 (oldest) : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
+   Q2          : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
+   Q3          : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
+   Q4 (recent) : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
+
+Also display both direction p-values (A→B and B→A) within each quarter card for transparency.
+
+The pair passes the full cointegration test only if ALL FOUR quarters pass (4/4).
+Report how many quarters passed (e.g. "2/4 quarters passed") even when the overall verdict is FAIL.

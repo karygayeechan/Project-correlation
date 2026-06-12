@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations, stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, and runs statistical cointegration tests and rolling pairs-trading signals.
+Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations, stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, runs quarterly cointegration tests (4 p-values over the past year), and executes pairs-trading signals with a quarterly-fixed hedge ratio.
 
 ## Environment Setup
 
@@ -67,15 +67,16 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 - `app/api_client.py` — HTTP client so Streamlit never touches the DB directly
 
 **Cointegration (`Cointegration test/`):**
-- `cointegration.py` — ADF test on each price series; Engle-Granger run in **both directions** (A→B and B→A); primary direction = lower p-value; both results shown on dashboard
+- `cointegration.py` — fetches the latest 1 year of data; splits into **4 equal quarterly windows**; runs ADF on each full-year series (prerequisite) and Engle-Granger in **both directions** (A→B and B→A) on each quarter; reports 4 EG p-values (one per quarter) with pass/fail; primary direction = lower p-value; full-year spread charts shown for context. Default pair: ARM/TSM.
 - `conclusions.py` — plain-English verdict strings for each test result
 
 **Trading Signals (`Trading signals/`):**
-- `trading_signals.py` — rolling 90-day OLS hedge ratio, spread, z-score, LONG/SHORT/EXIT/HOLD signals, daily position sizing (`position_B = −β_t × position_A`), daily PnL
+- `trading_signals.py` — **quarterly-fixed** hedge ratio β: estimated from a trailing 1-year (252-day) OLS at each calendar-quarter boundary, held constant for the full quarter. Z-score uses a 60–120 day rolling window (default 90). Generates LONG/SHORT/EXIT/HOLD signals; `position_B = −β_q × position_A`. Includes `quarter` column in output. Default pair: ARM/TSM.
 - Hypothetical 5-year PnL (cumulative, daily bars, monthly breakdown) is rendered at the bottom of the Trading Signals tab
+- Constants: `BETA_WINDOW = 252` (β estimation), `WINDOW = 90` (z-score default)
 
 **Backtest (`Backtest/`):**
-- `backtest.py` — 4y/1y train-test split (4 years warm-up, last 1 year evaluated); in-memory only; computes performance, trading activity, risk, stability, and scalability metrics
+- `backtest.py` — 4y/1y train-test split; runs `compute_rolling_signals` on full 5-year history (4-year warm-up ensures all test-period quarters have a calibrated β), slices the last 1 year for evaluation; in-memory only; computes performance, trading activity, risk, stability, and scalability metrics. Default pair: ARM/TSM.
 - `PLAN.md` — implementation notes and design decisions
 - `Backtest instruction` — original specification for the backtest tab
 
@@ -92,6 +93,8 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 - **DMA_BUFFER = 400 calendar days** — the 252-day SMH/QQQ z-score needs 252 trading days of warmup. 400 calendar days ≈ 276 trading days, enough to keep the z-score valid across the entire 1-year display window.
 - **State-based + crossing alerts** — each rule reports both current state (`triggered`) and whether it changed within the last 5 trading days (`recently_crossed`). This distinguishes a new actionable signal from a condition that has been true for weeks.
 - **`correlation_history` retained in schema** — table is kept for backwards compatibility but ETL no longer writes to it; the regime agent does not use correlation snapshots.
+- **Quarterly-fixed β, not daily rolling** — `trading_signals.py` and `backtest.py` estimate β from a trailing 1-year OLS once per calendar quarter (at the quarter boundary), then hold it fixed for the entire quarter. This eliminates daily β noise and negative-beta windows that could invert the hedge. `BETA_WINDOW = 252` trading days; z-score window is separately configurable (60–120 days).
+- **Default pair is ARM/TSM** — set across all tabs (Rolling Correlation, Cointegration, Trading Signals, Backtest) because ARM/TSM is the primary analytical pair used throughout the project.
 
 ## Git Workflow
 
@@ -117,6 +120,7 @@ Files to keep in sync:
 - **No test suite** — use each module's `if __name__ == "__main__"` block to smoke-test during development.
 - **Cointegration / Trading Signals / Backtest / Regime Detection modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, `Backtest/`, and `Regime detection agent/` are added to `sys.path` at the top of `streamlit_app.py` and `api/main.py` — if you move them, update those `sys.path.insert` calls.
 - **Trading Signals uses `st.session_state`**: results from the Trading Signals tab are stored under `st.session_state["ts_df"]` so the Daily PnL tab can read them without recomputing. If the user navigates to Daily PnL before running signals, they see a prompt to compute first.
+- **Quarterly β requires 252-day warmup**: `compute_rolling_signals` only assigns a β after `BETA_WINDOW = 252` trading days of history exist. Rows before that are NaN for beta/spread/z-score. The backtest's 4-year training window ensures this warmup is satisfied well before the test period begins.
 - **Decimal types from DB**: `psycopg2` returns `decimal.Decimal` for numeric columns — always cast to `float` before passing to numpy/statsmodels.
 - **FRED API 1-day lag**: FRED publishes TIPS yield (`DFII10`) with a 1-business-day delay. The most recent row in `tips_10y` is frequently NaN — this is expected; the dashboard displays "N/A" for that cell.
 - **Regime indicator cache TTL = 1 hour**: `_regime_indicators()` in Streamlit is cached for 3600s. First load takes ~30–60s (100+ tickers + FRED). The Refresh button calls `st.cache_data.clear()` to force a reload.

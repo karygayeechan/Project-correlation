@@ -12,7 +12,11 @@ Returns `(train_start, train_end, test_start, test_end)` based on today's date.
 
 **`run_backtest(sym_a, sym_b, window=90)`**
 1. Calls `fetch_prices` from `Trading signals/trading_signals.py` — same 5-year DB fetch used by the Trading Signals tab.
-2. Calls `compute_rolling_signals` on the **full** 5-year history — the 4-year training window warms up the rolling hedge ratio so the model is calibrated by the time the test period begins.
+2. Calls `compute_rolling_signals` on the **full** 5-year history using the **quarterly-fixed β** approach:
+   - β is estimated from a trailing 1-year (252-day) OLS, refreshed at each calendar-quarter boundary.
+   - β is held constant for the entire quarter — no daily drift.
+   - `window` controls only the z-score rolling mean/std (60–120 days, default 90).
+   - The 4-year training window ensures every quarter in the test period has a fully calibrated β.
 3. Slices the resulting DataFrame to `[test_start : test_end]` and returns both `(full_df, test_df)`.
 4. No DB writes. No changes to other tabs.
 
@@ -33,7 +37,7 @@ Master function that computes every metric the tab displays. Returns a single fl
 | Performance | Total PnL, annualized return %, Sharpe + label, quarterly Sharpe, rolling 30d/60d Sharpe, cumulative PnL, drawdown, max drawdown, Calmar + label, win rate, avg profit/trade, 5th/95th pct trade PnL |
 | Trading activity | # trades, avg holding period, half-life + label, total turnover, Sharpe at 0/1/5/10 bps cost + strategy verdict |
 | Risk | Ann. volatility, skewness, excess kurtosis, VaR 95%, CVaR 95%, max losing streak (days + value) |
-| Stability | Rolling 60-day ADF p-value on spread, z-score histogram, hedge ratio β series, rolling 60-day half-life series, std dev of trade PnL |
+| Stability | Rolling 60-day ADF p-value on spread, z-score histogram, quarterly-fixed β series (step-function chart + update count), rolling 60-day half-life series, std dev of trade PnL |
 | Scalability | Metrics recomputed at 1×/2×/5× position size |
 
 **Annualized return convention:** `mean(daily_pnl) × 252 / mean(price_a)` expressed as %. The mean price of stock A is used as the capital proxy (1 unit position size assumed throughout).
@@ -65,7 +69,7 @@ Master function that computes every metric the tab displays. Returns a single fl
 
 ## Design decisions
 
-- **Full 5-year warm-up, 1-year test slice:** Running signals on the full history before slicing avoids any "cold start" artifact in the rolling OLS during the test period. This correctly simulates live deployment where the model has been running for 4 years before the test window starts.
+- **Full 5-year warm-up, 1-year test slice:** Running signals on the full history before slicing avoids any "cold start" artifact during the test period. With quarterly β, each quarter's β requires 252 days of prior data; running on the full 5-year history ensures every quarter in the test window already has a calibrated β. This correctly simulates live deployment where the model has been running for 4 years before the test window starts.
 - **No DB modifications:** The backtest is entirely in-memory. `fetch_prices` reads from the DB (read-only) and `compute_rolling_signals` is a pure function.
 - **Capital proxy = mean(price_a):** Since position sizing is always ±1 unit of stock A, using the mean price of A over the test period as the capital denominator is a reasonable approximation for % return calculation.
 - **Scalability section is text-only (per instruction):** Sharpe is mathematically scale-invariant (multiplying PnL by a constant leaves mean/std unchanged), so only absolute metrics (total PnL, max DD) change. This is surfaced as text rather than charts to avoid visual clutter.

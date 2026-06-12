@@ -1,0 +1,36 @@
+After a pair of stock has received positive recommendation from cointegration test (passes all criteria), perform below steps:
+
+1. Choose a z-score rolling window of 60–120 days (default 90).
+
+2. Compute quarterly-fixed hedge ratio β:
+   - At each calendar-quarter boundary, run OLS regression using the trailing 1-year window
+     (252 trading days) of past data only (no look-ahead).
+   - The resulting α and β are fixed and held constant for the entire quarter.
+   - β is NOT updated daily — it changes only at the start of each new calendar quarter.
+
+3. Compute spread at each time t using the quarter's fixed α and β:
+   spread_t = A_t − (α_q + β_q × B_t)
+   where α_q and β_q are the values estimated at the start of the current quarter q.
+
+4. Convert spread into z-score using a rolling window (60–120 days):
+   z_t = (spread_t − μ_t) / σ_t
+   where μ_t and σ_t are the rolling mean and std of the spread over the chosen window.
+
+5. Generate trading signals:
+   1) z < −2  → LONG spread
+   2) z >  2  → SHORT spread
+   3) |z| < 0.5 → EXIT the trade
+   4) otherwise → HOLD
+
+6. Translate signals into actual positions:
+   1) z < −2 (LONG spread):  buy A and sell β_q × B
+   2) z >  2 (SHORT spread): sell A and buy β_q × B
+   Print the translations of these signals based on calculation.
+
+7. Position sizing uses the quarter's fixed β:
+   position_B = −β_q × position_A
+   β_q does not change day-to-day within a quarter.
+   Print the position size.
+
+8. Build daily PnL:
+   PnL_t = position_A_{t−1} × ΔA_t + position_B_{t−1} × ΔB_t

@@ -24,9 +24,9 @@ def _get_connection():
 
 
 def fetch_prices(sym_a: str, sym_b: str) -> tuple[pd.Series, pd.Series]:
-    """Return 5-year adj_close Series for sym_a and sym_b, aligned by date."""
+    """Return latest 1-year adj_close Series for sym_a and sym_b, aligned by date."""
     end = date.today()
-    start = end - timedelta(days=5 * 365)
+    start = end - timedelta(days=365)
     conn = _get_connection()
     try:
         cur = conn.cursor()
@@ -100,35 +100,67 @@ def run_engle_granger(series_a: pd.Series, series_b: pd.Series) -> dict:
 
 
 def run_all(sym_a: str, sym_b: str) -> dict:
-    """Run full cointegration analysis and return all results.
+    """Run cointegration analysis on the latest 1 year of data, split into 4 quarters.
 
-    Engle-Granger is not symmetric: regressing A on B vs B on A produces
-    different residuals and can flip the verdict. Both directions are run;
-    the one with the lower spread ADF p-value is called 'primary' and drives
-    pair_passes. The other is returned as 'eg_reverse' for full transparency.
+    The past year is divided into 4 equal quarterly windows (oldest = Q1, most recent = Q4).
+    Each quarter produces its own EG p-value (both directions). The headline p-value per
+    quarter is the primary direction (lower of the two). Pass condition per quarter: p < 0.05.
+
+    Also runs ADF on the full-year series (prerequisite check) and full-year EG for the
+    spread charts shown in the detailed sections.
     """
     series_a, series_b = fetch_prices(sym_a, sym_b)
+
+    # Full-year ADF (prerequisite: both series should be non-stationary)
     adf_a = run_adf(series_a, sym_a)
     adf_b = run_adf(series_b, sym_b)
 
-    eg_ab = run_engle_granger(series_a, series_b)  # regress sym_a on sym_b
-    eg_ba = run_engle_granger(series_b, series_a)  # regress sym_b on sym_a
-
-    # Primary = direction with the stronger cointegration signal (lower p-value)
-    if eg_ab["p_value"] <= eg_ba["p_value"]:
-        eg_primary, eg_rev = eg_ab, eg_ba
+    # Full-year EG for spread charts in the detail section
+    eg_ab_full = run_engle_granger(series_a, series_b)
+    eg_ba_full = run_engle_granger(series_b, series_a)
+    if eg_ab_full["p_value"] <= eg_ba_full["p_value"]:
+        eg_primary, eg_rev = eg_ab_full, eg_ba_full
         eg_direction = f"{sym_a}→{sym_b}"
         eg_rev_direction = f"{sym_b}→{sym_a}"
     else:
-        eg_primary, eg_rev = eg_ba, eg_ab
+        eg_primary, eg_rev = eg_ba_full, eg_ab_full
         eg_direction = f"{sym_b}→{sym_a}"
         eg_rev_direction = f"{sym_a}→{sym_b}"
 
-    pair_passes = (
-        not adf_a["is_stationary"]
-        and not adf_b["is_stationary"]
-        and eg_primary["is_cointegrated"]
-    )
+    # Split into 4 quarterly windows and run EG on each
+    n = len(series_a)
+    q_size = n // 4
+    quarters = []
+    for q in range(4):
+        start_idx = q * q_size
+        end_idx = n if q == 3 else (q + 1) * q_size
+        a_q = series_a.iloc[start_idx:end_idx]
+        b_q = series_b.iloc[start_idx:end_idx]
+
+        eg_ab_q = run_engle_granger(a_q, b_q)
+        eg_ba_q = run_engle_granger(b_q, a_q)
+
+        if eg_ab_q["p_value"] <= eg_ba_q["p_value"]:
+            primary_p = eg_ab_q["p_value"]
+            primary_direction = f"{sym_a}→{sym_b}"
+        else:
+            primary_p = eg_ba_q["p_value"]
+            primary_direction = f"{sym_b}→{sym_a}"
+
+        quarters.append({
+            "label": f"Q{q + 1}",
+            "start_date": a_q.index[0],
+            "end_date": a_q.index[-1],
+            "n_obs": len(a_q),
+            "eg_ab": eg_ab_q,
+            "eg_ba": eg_ba_q,
+            "primary_p": primary_p,
+            "primary_direction": primary_direction,
+            "passes": primary_p < 0.05,
+        })
+
+    quarters_passing = sum(q["passes"] for q in quarters)
+    pair_passes = quarters_passing == 4
 
     return {
         "sym_a": sym_a,
@@ -139,6 +171,8 @@ def run_all(sym_a: str, sym_b: str) -> dict:
         "eg_direction": eg_direction,
         "eg_reverse": eg_rev,
         "eg_reverse_direction": eg_rev_direction,
+        "quarters": quarters,
+        "quarters_passing": quarters_passing,
         "pair_passes": pair_passes,
     }
 
@@ -147,5 +181,10 @@ if __name__ == "__main__":
     results = run_all("NVDA", "TSM")
     print(f"ADF {results['sym_a']}: p={results['adf_a']['p_value']:.4f} {results['adf_a']['verdict']}")
     print(f"ADF {results['sym_b']}: p={results['adf_b']['p_value']:.4f} {results['adf_b']['verdict']}")
-    print(f"Engle-Granger: beta={results['eg']['beta']:.4f}, p={results['eg']['p_value']:.4f} {results['eg']['verdict']}")
-    print(f"Pair passes: {results['pair_passes']}")
+    print(f"\nQuarterly cointegration (EG primary direction p-value):")
+    for q in results["quarters"]:
+        icon = "✓" if q["passes"] else "✗"
+        print(f"  {q['label']} ({q['start_date'].date()} → {q['end_date'].date()}): "
+              f"p={q['primary_p']:.4f} [{q['primary_direction']}]  {icon}")
+    print(f"\nQuarters passing: {results['quarters_passing']}/4")
+    print(f"Pair passes (all 4): {results['pair_passes']}")

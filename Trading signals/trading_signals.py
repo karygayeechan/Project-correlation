@@ -10,7 +10,8 @@ from statsmodels.tools import add_constant
 
 load_dotenv()
 
-WINDOW = 90  # rolling window in trading days
+WINDOW = 90        # rolling window for z-score mean/std (60–120 days, default 90)
+BETA_WINDOW = 252  # trailing 1-year OLS window for quarterly β estimation
 
 
 def _get_connection():
@@ -56,15 +57,16 @@ def compute_rolling_signals(
     series_a: pd.Series, series_b: pd.Series, window: int = WINDOW
 ) -> pd.DataFrame:
     """
-    Full rolling pairs-trading signal pipeline (instruction steps 1–8).
+    Quarterly-fixed hedge ratio pairs-trading pipeline (instruction steps 1–8).
 
-    Step 1: rolling window = `window` days
-    Step 2: βt — OLS of A on B using only the past `window` days at each t
-    Step 3: spread_t = A_t − (α_t + β_t × B_t)
-    Step 4: z_t = (spread_t − μ_t) / σ_t  where μ/σ are rolling over `window`
+    Step 1: z-score window = `window` days (60–120, default 90)
+    Step 2: β estimated from trailing 1-year OLS (252 days), refreshed at each
+            calendar-quarter boundary — fixed for the entire quarter, no daily drift
+    Step 3: spread_t = A_t − (α_q + β_q × B_t)  using the quarter's fixed α/β
+    Step 4: z_t = (spread_t − μ_t) / σ_t  where μ/σ roll over `window` days
     Step 5: z < −2 → LONG, z > 2 → SHORT, |z| < 0.5 → EXIT, else HOLD
     Step 6: LONG → buy 1 A / sell β B; SHORT → sell 1 A / buy β B
-    Step 7: position_B updated daily: position_B = −β_t × position_A
+    Step 7: position_B = −β_q × position_A  (β_q is the quarter's fixed value)
     Step 8: PnL_t = pos_A_{t−1} × ΔA_t + pos_B_{t−1} × ΔB_t
     """
     n = len(series_a)
@@ -72,27 +74,45 @@ def compute_rolling_signals(
     a_vals = series_a.values.astype(float)
     b_vals = series_b.values.astype(float)
 
-    # Step 2: rolling OLS
-    alphas = np.full(n, np.nan)
-    betas = np.full(n, np.nan)
-    for i in range(window, n):
-        a_w = a_vals[i - window:i]
-        b_w = b_vals[i - window:i]
-        x = add_constant(b_w)
-        model = OLS(a_w, x).fit()
-        alphas[i] = model.params[0]
-        betas[i] = model.params[1]
+    # Step 2: quarterly-fixed β — recomputed at each calendar quarter boundary
+    # using a trailing 1-year (BETA_WINDOW) OLS.  Requires BETA_WINDOW days of
+    # history before the first β can be estimated, so early rows stay NaN.
+    quarter_labels = pd.PeriodIndex(dates, freq="Q")
+    quarter_change_idx = set(
+        int(i) for i in np.where(quarter_labels != np.roll(quarter_labels, 1))[0]
+        if i >= BETA_WINDOW
+    )
+    # Always compute at the first eligible day too
+    quarter_change_idx.add(BETA_WINDOW)
 
-    # Step 3: rolling spread
+    alphas = np.full(n, np.nan)
+    betas  = np.full(n, np.nan)
+    cur_alpha, cur_beta = np.nan, np.nan
+
+    for i in range(BETA_WINDOW, n):
+        if i in quarter_change_idx:
+            a_w = a_vals[i - BETA_WINDOW:i]
+            b_w = b_vals[i - BETA_WINDOW:i]
+            x = add_constant(b_w)
+            model = OLS(a_w, x).fit()
+            cur_alpha = float(model.params[0])
+            cur_beta  = float(model.params[1])
+        alphas[i] = cur_alpha
+        betas[i]  = cur_beta
+
+    # Carry a "quarter_label" column so the UI can show which β is active
+    quarter_str = [str(q) for q in quarter_labels]
+
+    # Step 3: spread using fixed quarterly α/β
     spreads = a_vals - (alphas + betas * b_vals)
 
-    # Step 4: rolling z-score
-    spread_s = pd.Series(spreads, index=dates)
+    # Step 4: z-score — rolling mean/std over `window` days (60–120)
+    spread_s  = pd.Series(spreads, index=dates)
     roll_mean = spread_s.rolling(window).mean()
-    roll_std = spread_s.rolling(window).std()
-    z_scores = (spread_s - roll_mean) / roll_std
+    roll_std  = spread_s.rolling(window).std()
+    z_scores  = (spread_s - roll_mean) / roll_std
 
-    # Step 5: raw signal per row
+    # Step 5: raw signal
     z = z_scores.values
     raw_signal = np.where(
         z < -2, "LONG",
@@ -100,10 +120,10 @@ def compute_rolling_signals(
         np.where(np.abs(z) < 0.5, "EXIT", "HOLD"))
     )
 
-    # Steps 6 & 7: stateful positions; position_B = −β_t × position_A daily
+    # Steps 6 & 7: stateful positions; β is the fixed quarterly value
     position_a = np.zeros(n)
     position_b = np.zeros(n)
-    cur_pos_a = 0.0
+    cur_pos_a  = 0.0
 
     for i in range(n):
         if np.isnan(betas[i]):
@@ -115,11 +135,11 @@ def compute_rolling_signals(
             cur_pos_a = -1.0
         elif sig == "EXIT":
             cur_pos_a = 0.0
-        # HOLD: keep cur_pos_a, but refresh position_b with today's β below
+        # HOLD: keep cur_pos_a unchanged; β is the current quarter's fixed value
         position_a[i] = cur_pos_a
         position_b[i] = -betas[i] * cur_pos_a
 
-    # Step 8: daily PnL (positions from previous close)
+    # Step 8: daily PnL
     delta_a = pd.Series(a_vals, index=dates).diff()
     delta_b = pd.Series(b_vals, index=dates).diff()
     pos_a_s = pd.Series(position_a, index=dates)
@@ -127,20 +147,21 @@ def compute_rolling_signals(
     pnl = pos_a_s.shift(1) * delta_a + pos_b_s.shift(1) * delta_b
 
     df = pd.DataFrame({
-        "price_a": a_vals,
-        "price_b": b_vals,
-        "alpha": alphas,
-        "beta": betas,
-        "spread": spreads,
+        "price_a":      a_vals,
+        "price_b":      b_vals,
+        "quarter":      quarter_str,
+        "alpha":        alphas,
+        "beta":         betas,
+        "spread":       spreads,
         "rolling_mean": roll_mean.values,
-        "rolling_std": roll_std.values,
-        "z_score": z_scores.values,
-        "signal": raw_signal,
-        "position_a": position_a,
-        "position_b": position_b,
-        "delta_a": delta_a.values,
-        "delta_b": delta_b.values,
-        "pnl": pnl.values,
+        "rolling_std":  roll_std.values,
+        "z_score":      z_scores.values,
+        "signal":       raw_signal,
+        "position_a":   position_a,
+        "position_b":   position_b,
+        "delta_a":      delta_a.values,
+        "delta_b":      delta_b.values,
+        "pnl":          pnl.values,
     }, index=dates)
 
     df["cumulative_pnl"] = df["pnl"].fillna(0).cumsum()

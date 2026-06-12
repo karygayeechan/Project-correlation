@@ -9,13 +9,14 @@ rolling pairs-trading strategy for any two tickers in the database, following th
 
 ## Step 1 — Read the instruction file
 Confirmed the 8-step procedure:
-1. Rolling window of 90 days
-2. Rolling hedge ratio βt via OLS (past data only)
-3. Rolling spread: spread_t = A_t − (α_t + β_t × B_t)
-4. Rolling z-score: z_t = (spread_t − μ_t) / σ_t
+1. Z-score rolling window of 60–120 days (default 90) for mean/std computation
+2. Quarterly-fixed hedge ratio β: at each calendar-quarter boundary, run OLS on trailing
+   1-year (252-day) window — β is fixed for the entire quarter, not updated daily
+3. Quarterly spread: spread_t = A_t − (α_q + β_q × B_t)  where α_q/β_q are the quarter's fixed values
+4. Rolling z-score: z_t = (spread_t − μ_t) / σ_t  over the chosen 60–120 day window
 5. Signals: z < −2 → LONG, z > 2 → SHORT, |z| < 0.5 → EXIT, else HOLD
-6. Translate signals: LONG → buy 1 A / sell β B; SHORT → sell 1 A / buy β B
-7. Daily position sizing: position_B = −β_t × position_A (updated every day)
+6. Translate signals: LONG → buy 1 A / sell β_q B; SHORT → sell 1 A / buy β_q B
+7. Position sizing uses the quarter's fixed β: position_B = −β_q × position_A
 8. Daily PnL: PnL_t = pos_A_{t−1} × ΔA_t + pos_B_{t−1} × ΔB_t
 
 ---
@@ -29,17 +30,19 @@ Pure computation module. No Streamlit imports.
 - Casts Decimal DB values to float
 
 ### `compute_rolling_signals(series_a, series_b, window=90) -> pd.DataFrame`
-Core pipeline function:
+Core pipeline function. `window` controls z-score mean/std (60–120 days).
 
-**Step 2 — Rolling OLS**
-- Loops over each date t from index `window` to `n`
-- At each t: slice the past `window` rows of A and B
-- Fit OLS(A_window ~ const + B_window) → extract α_t (params[0]), β_t (params[1])
-- Uses only past data at each step — no look-ahead
+**Step 2 — Quarterly-fixed OLS β**
+- Constants: `BETA_WINDOW = 252` (1-year trailing OLS), `WINDOW = 90` (z-score default)
+- Identifies calendar-quarter boundaries in the date index (using `pd.PeriodIndex freq='Q'`)
+- At each quarter boundary (and at the first eligible day after 252-day warmup):
+  slices the past 252 rows and fits `OLS(A ~ const + B)` → new `cur_alpha`, `cur_beta`
+- β is held constant until the next quarter boundary — no daily drift
+- Early rows (< 252 days of history) remain NaN
 
-**Step 3 — Rolling spread**
-- `spread_t = A_t − (α_t + β_t × B_t)`
-- Vectorised after the OLS loop completes
+**Step 3 — Quarterly spread**
+- `spread_t = A_t − (α_q + β_q × B_t)` where α_q/β_q are the current quarter's fixed values
+- Spread may show a small step at quarter boundaries when α/β update
 
 **Step 4 — Rolling z-score**
 - `roll_mean = spread.rolling(window).mean()`
@@ -50,14 +53,13 @@ Core pipeline function:
 - Vectorised np.where: z < −2 → LONG, z > 2 → SHORT, |z| < 0.5 → EXIT, else HOLD
 
 **Steps 6 & 7 — Stateful positions**
-- Scalar `cur_pos_a` carries the current long/short/flat state forward
-- LONG → cur_pos_a = +1; SHORT → cur_pos_a = −1; EXIT → cur_pos_a = 0; HOLD → unchanged
-- `position_b[i] = −β_t × cur_pos_a` recalculated every day (daily β refresh per step 7)
+- Scalar `cur_pos_a` carries state forward
+- LONG → +1; SHORT → −1; EXIT → 0; HOLD → unchanged
+- `position_b[i] = −β_q × cur_pos_a`  (β_q is the quarter's fixed value)
 
 **Step 8 — Daily PnL**
 - `delta_a = A.diff()`, `delta_b = B.diff()`
 - `pnl_t = position_a.shift(1) × delta_a_t + position_b.shift(1) × delta_b_t`
-- (shift(1) uses previous close position against today's price move)
 - `cumulative_pnl = pnl.fillna(0).cumsum()`
 
 ### `signal_translation(row, sym_a, sym_b) -> str`
@@ -65,8 +67,9 @@ Core pipeline function:
 - e.g. "BUY 1 NVDA  |  SELL 0.6926 TSM"
 
 ### Returns DataFrame with columns:
-`price_a, price_b, alpha, beta, spread, rolling_mean, rolling_std,
+`price_a, price_b, quarter, alpha, beta, spread, rolling_mean, rolling_std,
 z_score, signal, position_a, position_b, delta_a, delta_b, pnl, cumulative_pnl`
+(`quarter` is the calendar quarter label, e.g. "2025Q3", showing which β is active)
 
 ---
 
@@ -126,8 +129,11 @@ Trading signals/
 
 | Decision | Reason |
 |----------|--------|
-| OLS loop (not vectorised roll) | Ensures strictly past-only data at each t — no look-ahead bias |
-| `position_b = −β_t × position_a` (negative sign) | LONG spread = buy A / sell B; SHORT = sell A / buy B — direction encoded in sign of position_a |
+| Quarterly β, not daily rolling | Eliminates daily β noise and negative-beta windows; matches how a real desk re-estimates hedge ratios |
+| Trailing 1-year OLS for β | More data → stabler estimate; 252 days balances recency with variance |
+| β fixed per calendar quarter | Clean boundaries (Q1/Q2/Q3/Q4); easy to audit which β is live |
+| Z-score window 60–120 days | Separate from β estimation; user-configurable in the UI |
+| `position_b = −β_q × position_a` (negative sign) | LONG spread = buy A / sell B; SHORT = sell A / buy B — direction encoded in sign of position_a |
 | `pnl uses .shift(1)` | Position entered at close of t−1 earns the price move from t−1 to t |
-| Results in `session_state` | Avoids recomputing the expensive rolling OLS when user switches to Daily PnL tab |
-| No cointegration gate | User selects any pair; a caption notes pairs should ideally pass the Cointegration Test first |
+| Results in `session_state` | Avoids recomputing when user switches to Daily PnL tab |
+| No cointegration gate | User selects any pair; caption notes pairs should ideally pass the Cointegration Test first |

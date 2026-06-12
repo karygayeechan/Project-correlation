@@ -9,8 +9,8 @@ Analyzes return correlations between tech stocks and monitors macro market regim
 3. **Loads** everything into PostgreSQL
 4. **Visualizes** correlations in a 6-tab Streamlit dashboard with interactive controls and ticker management
 5. **Monitors macro regime** — live indicator engine tracks 10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth (% above 200DMA), VIX trend, and SMH/QQQ relative strength across 10 alert rules with severity levels and recent-crossing detection
-6. **Cointegration testing** — ADF test on individual price series + bidirectional Engle-Granger test (both A→B and B→A) to determine if a pair shares a stable long-run relationship
-7. **Trading signals** — rolling 90-day hedge ratio, z-score spread signals (LONG/SHORT/EXIT), daily position sizing, and PnL tracking
+6. **Cointegration testing** — ADF on each series + bidirectional Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year, producing 4 p-values that show whether the relationship holds across each quarter
+7. **Trading signals** — **quarterly-fixed** hedge ratio β (trailing 1-year OLS, refreshed at each calendar-quarter boundary), z-score spread signals (LONG/SHORT/EXIT), position sizing, and PnL tracking
 8. **Backtesting** — 4-year training warm-up + 1-year out-of-sample evaluation with performance, risk, stability, and scalability metrics
 9. **AI regime commentary** — on-demand ~100-word Claude briefing summarising live macro conditions and triggered alerts; one entry cached per calendar day in the database
 
@@ -60,7 +60,7 @@ project_correlation/
 │   ├── PLAN.md                           # implementation plan
 │   └── Cointegration test instruction    # original spec
 ├── Trading signals/
-│   ├── trading_signals.py                # rolling hedge ratio, z-score signals, PnL
+│   ├── trading_signals.py                # quarterly-fixed β, z-score signals, PnL
 │   ├── PLAN.md                           # implementation plan
 │   └── Trading signals (...) instructions  # original spec
 ├── Backtest/
@@ -110,10 +110,10 @@ streamlit run app/streamlit_app.py
 - [x] `Regime detection agent/data_collector.py` — fetches 10Y yield (yfinance `^TNX`), TIPS real yield (FRED `DFII10`), Nasdaq-100 breadth (computed across ~98 NDX components), VIX (`^VIX`), SMH/QQQ ratio + z-score
 - [x] `Regime detection agent/regime_alerts.py` — 10 alert rules: yield crossovers (50DMA, 200DMA, 20d ROC), TIPS level + trend + monthly rise, NDX breadth zones, VIX 20/100DMA, SMH/QQQ 100DMA + death cross
 - [x] `Regime detection agent/commentary.py` — on-demand ~100-word AI regime briefing via Claude; cached one per calendar day in `correlation_alerts`
-- [x] `Cointegration test/cointegration.py` — ADF on each series + **bidirectional** Engle-Granger (A→B and B→A); primary direction = lower p-value; both results shown on dashboard
+- [x] `Cointegration test/cointegration.py` — ADF on full-year series + **bidirectional** Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year; 4 EG p-values shown with per-quarter pass/fail; full-year spread charts for context
 - [x] `Cointegration test/conclusions.py` — plain-English verdict strings
-- [x] `Trading signals/trading_signals.py` — rolling 90-day OLS hedge ratio, z-score signals, stateful positions with daily β refresh, daily PnL
-- [x] `Backtest/backtest.py` — 4yr train / 1yr test split; performance, trading activity, risk, stability, and scalability metrics; in-memory only (no DB writes)
+- [x] `Trading signals/trading_signals.py` — **quarterly-fixed** β estimated from trailing 1-year OLS at each calendar-quarter boundary; z-score window 60–120 days (default 90); stateful positions with quarterly β, daily PnL
+- [x] `Backtest/backtest.py` — 4yr train / 1yr test split; quarterly-fixed β (inherited from trading_signals); performance, trading activity, risk, stability, and scalability metrics; in-memory only (no DB writes)
 - [x] Manage Tickers ETL corrected to 5-year data fetch (was labelled 1y in UI)
 
 ---
@@ -127,9 +127,9 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 | Tab | Type | Description |
 |---|---|---|
 | **Correlation** | Read | Three sub-tabs: **Heatmap** (pairwise Pearson r matrix; toggle tickers, period, end date; ranked pairs table), **Rolling** (pair correlation over time with selectable window: 21/42/63/126 days), **Network Graph** (circular graph; edge thickness/color encode correlation strength; threshold slider). |
-| **Cointegration** | Read | ADF test on each price series to confirm non-stationarity, then **bidirectional** Engle-Granger test (A→B and B→A). Primary direction = lower spread ADF p-value; both results shown with ★ badge. Pass/fail verdict with plain-English conclusions. Default pair: MSFT/META. |
-| **Trading Signals** | Read | Rolling 90-day pairs strategy for any two tickers. Computes hedge ratio β, spread z-score, and generates LONG/SHORT/EXIT signals. Shows current trade instruction, z-score chart, rolling β, and signal log. Hypothetical 5-year PnL section at bottom (cumulative PnL, Sharpe, max drawdown, win rate). Default pair: MSFT/META. |
-| **Backtest (4yr/1yr)** | Read | Out-of-sample evaluation: 4-year rolling warm-up + last 1 year as test slice. Five sections: Performance (Sharpe, Calmar, drawdown, win rate), Trading Activity (trade count, holding period, cost sensitivity), Risk (vol, VaR, CVaR, skew, kurtosis), Stability (rolling ADF, z-score histogram, β series, rolling half-life), Scalability (1×/2×/5× position size comparison). Default pair: MSFT/META. |
+| **Cointegration** | Read | ADF test on the full-year series to confirm non-stationarity, then **bidirectional** Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year. Each quarter card shows its own EG p-value and pass/fail badge. Overall verdict: all 4 quarters must pass. Full-year spread charts shown for context. Default pair: ARM/TSM. |
+| **Trading Signals** | Read | Quarterly-fixed β pairs strategy for any two tickers. β estimated from trailing 1-year OLS at each calendar-quarter boundary, held fixed for the quarter — visualised as a step-function chart. Z-score window: 60–120 days (default 90). Shows current trade instruction, z-score chart, quarterly β chart, and signal log (with active quarter column). Hypothetical 5-year PnL at bottom. Default pair: ARM/TSM. |
+| **Backtest (4yr/1yr)** | Read | Out-of-sample evaluation: 4-year warm-up (calibrates quarterly β) + last 1 year as test slice. Five sections: Performance (Sharpe, Calmar, drawdown, win rate), Trading Activity (trade count, holding period, cost sensitivity), Risk (vol, VaR, CVaR, skew, kurtosis), Stability (rolling ADF, z-score histogram, quarterly β step-function + update count, rolling half-life), Scalability (1×/2×/5× position size comparison). Default pair: ARM/TSM. |
 | **Regime Alerts** | Read | Two sections: **Macro Regime Indicators** — live 5-indicator dashboard with 10 color-coded alert rules (🔴 critical / 🟡 warning / 🟢 OK), expandable per-indicator blocks, and triggered-alerts summary table; **AI Regime Commentary** — on-demand ~100-word Claude briefing on rate environment, breadth, volatility, and sector momentum; last 5 days of history shown. |
 | **Manage Tickers** | Write | Add a ticker (fetches 5 years, triggers ETL for all current + new), remove a ticker (cascades deletes from all ticker-linked tables), or refresh all data. |
 
