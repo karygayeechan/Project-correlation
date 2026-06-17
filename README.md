@@ -5,11 +5,11 @@ Analyzes return correlations between tech stocks and monitors macro market regim
 ## What This Project Does
 
 1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 years across tickers: NVDA, GOOGL, AVGO, ARM, TSM (and any dynamically added tickers)
-2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over 1-month and 6-month windows
+2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over **6-month, 12-month, and 24-month** windows
 3. **Loads** everything into PostgreSQL
 4. **Visualizes** correlations in a 6-tab Streamlit dashboard with interactive controls and ticker management
 5. **Monitors macro regime** — live indicator engine tracks 10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth (% above 200DMA), VIX trend, and SMH/QQQ relative strength across 10 alert rules with severity levels and recent-crossing detection
-6. **Cointegration testing** — ADF on each series + bidirectional Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year, producing 4 p-values that show whether the relationship holds across each quarter
+6. **Cointegration testing** — ADF prerequisite check (5-year data) + bidirectional Engle-Granger spread charts on **5-year** and **2-year** data + quarterly p-values on **4 quarterly windows within the past 1 year**, all showing both directions (A regressed on B and B regressed on A)
 7. **Trading signals** — **quarterly-fixed** hedge ratio β (trailing 1-year OLS, refreshed at each calendar-quarter boundary), z-score spread signals (LONG/SHORT/EXIT), position sizing, and PnL tracking
 8. **Backtesting** — 4-year training warm-up + 1-year out-of-sample evaluation with performance, risk, stability, and scalability metrics
 9. **AI regime commentary** — on-demand ~100-word Claude briefing summarising live macro conditions and triggered alerts; one entry cached per calendar day in the database
@@ -98,7 +98,7 @@ streamlit run app/streamlit_app.py
 
 - [x] Database schema (`db/schema.sql`) — 7 tables, indexes, constraints, `IF NOT EXISTS` for safe re-runs
 - [x] `etl/extract.py` — fetches 5 years of daily prices + company metadata from yfinance
-- [x] `etl/transform.py` — reshapes wide DataFrame to long format; `compute_correlations()` produces 1m/6m Pearson pairs
+- [x] `etl/transform.py` — reshapes wide DataFrame to long format; `compute_correlations()` produces **6m/12m/24m** Pearson pairs
 - [x] `etl/load.py` — inserts companies, company_details, stock_prices (`ON CONFLICT DO NOTHING`); upserts correlations (`ON CONFLICT DO UPDATE`); writes `etl_log` row on success or error; accepts dynamic ticker list
 - [x] ETL logging — every pipeline run writes status, row counts, duration, and any error to `etl_log`
 - [x] Schema applied to PostgreSQL — all 7 tables and indexes created
@@ -110,7 +110,7 @@ streamlit run app/streamlit_app.py
 - [x] `Regime detection agent/data_collector.py` — fetches 10Y yield (yfinance `^TNX`), TIPS real yield (FRED `DFII10`), Nasdaq-100 breadth (computed across ~98 NDX components), VIX (`^VIX`), SMH/QQQ ratio + z-score
 - [x] `Regime detection agent/regime_alerts.py` — 10 alert rules: yield crossovers (50DMA, 200DMA, 20d ROC), TIPS level + trend + monthly rise, NDX breadth zones, VIX 20/100DMA, SMH/QQQ 100DMA + death cross
 - [x] `Regime detection agent/commentary.py` — on-demand ~100-word AI regime briefing via Claude; cached one per calendar day in `correlation_alerts`
-- [x] `Cointegration test/cointegration.py` — ADF on full-year series + **bidirectional** Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year; 4 EG p-values shown with per-quarter pass/fail; full-year spread charts for context
+- [x] `Cointegration test/cointegration.py` — three data windows: **5-year** (ADF banner + bidirectional EG spread charts), **2-year** (additional bidirectional EG spread charts), **1-year** split into **4 quarterly windows** for EG p-values; all sections show both directions (A→B and B→A) with explicit regression labels and ★ primary marker
 - [x] `Cointegration test/conclusions.py` — plain-English verdict strings
 - [x] `Trading signals/trading_signals.py` — **quarterly-fixed** β estimated from trailing 1-year OLS at each calendar-quarter boundary; z-score window 60–120 days (default 90); stateful positions with quarterly β, daily PnL
 - [x] `Backtest/backtest.py` — 4yr train / 1yr test split; quarterly-fixed β (inherited from trading_signals); performance, trading activity, risk, stability, and scalability metrics; in-memory only (no DB writes)
@@ -126,8 +126,8 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 
 | Tab | Type | Description |
 |---|---|---|
-| **Correlation** | Read | Three sub-tabs: **Heatmap** (pairwise Pearson r matrix; toggle tickers, period, end date; ranked pairs table), **Rolling** (pair correlation over time with selectable window: 21/42/63/126 days), **Network Graph** (circular graph; edge thickness/color encode correlation strength; threshold slider). |
-| **Cointegration** | Read | ADF test on the full-year series to confirm non-stationarity, then **bidirectional** Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year. Each quarter card shows its own EG p-value and pass/fail badge. Overall verdict: all 4 quarters must pass. Full-year spread charts shown for context. Default pair: ARM/TSM. |
+| **Correlation** | Read | Three sub-tabs: **Heatmap** (pairwise Pearson r; period radio **6m / 12m / 24m**, default 24m; ranked pairs table shows all three period columns sorted by selected period), **Rolling** (90-day rolling window over a fixed **5-year span** ending today; always current regardless of sidebar), **Network Graph** (circular graph; period radio **24m / 60m**, default 24m; default |r| threshold 0.65). |
+| **Cointegration** | Read | ADF banner (5-year data; alerts if any series is stationary). Then **four EG spread charts**: **5-year primary** and **5-year reverse** direction, followed by **2-year primary** and **2-year reverse** direction — each explicitly titled with its data period and regression direction. Below that, **quarterly p-values (1-year)** split into 4 equal windows (~63 trading days each), each card showing both directions with "X regressed on Y" labels and ★ on the primary (lower p-value). Overall verdict: all 4 quarters must pass. Default pair: ARM/TSM. |
 | **Trading Signals** | Read | Quarterly-fixed β pairs strategy for any two tickers. β estimated from trailing 1-year OLS at each calendar-quarter boundary, held fixed for the quarter — visualised as a step-function chart. Z-score window: 60–120 days (default 90). Shows current trade instruction, z-score chart, quarterly β chart, and signal log (with active quarter column). Hypothetical 5-year PnL at bottom. Default pair: ARM/TSM. |
 | **Backtest (4yr/1yr)** | Read | Out-of-sample evaluation: 4-year warm-up (calibrates quarterly β) + last 1 year as test slice. Five sections: Performance (Sharpe, Calmar, drawdown, win rate), Trading Activity (trade count, holding period, cost sensitivity), Risk (vol, VaR, CVaR, skew, kurtosis), Stability (rolling ADF, z-score histogram, quarterly β step-function + update count, rolling half-life), Scalability (1×/2×/5× position size comparison). Default pair: ARM/TSM. |
 | **Regime Alerts** | Read | Two sections: **Macro Regime Indicators** — live 5-indicator dashboard with 10 color-coded alert rules (🔴 critical / 🟡 warning / 🟢 OK), expandable per-indicator blocks, and triggered-alerts summary table; **AI Regime Commentary** — on-demand ~100-word Claude briefing on rate environment, breadth, volatility, and sector momentum; last 5 days of history shown. |

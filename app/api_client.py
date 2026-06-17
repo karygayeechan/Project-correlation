@@ -33,6 +33,12 @@ def _delete(path: str) -> httpx.Response:
 
 # ─── Read queries (mirror db.py signatures) ───────────────────────────────────
 
+def get_latest_price_date():
+    from datetime import date as _date
+    raw = _get("/prices/latest-date").json().get("latest_date")
+    return _date.fromisoformat(raw) if raw else None
+
+
 def get_tickers() -> list[str]:
     return _get("/tickers").json()
 

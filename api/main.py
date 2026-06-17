@@ -88,6 +88,13 @@ def delete_ticker(symbol: str):
 
 # ─── Prices ───────────────────────────────────────────────────────────────────
 
+@app.get("/prices/latest-date", tags=["Prices"])
+def get_latest_price_date():
+    """Return the most recent date for which any price data exists in the DB."""
+    latest = db.get_latest_price_date()
+    return {"latest_date": str(latest) if latest else None}
+
+
 @app.get("/prices", tags=["Prices"])
 def get_prices(
     tickers: str = Query(..., description="Comma-separated ticker symbols, e.g. NVDA,GOOGL"),
@@ -110,7 +117,7 @@ def get_prices(
 @app.get("/correlations/heatmap", tags=["Correlations"])
 def get_corr_heatmap(
     tickers: str = Query(..., description="Comma-separated ticker symbols"),
-    period: str = Query("1m", description="'1m' (21 trading days) or '6m' (126 trading days)"),
+    period: str = Query("24m", description="'6m' (126 days), '12m' (252 days), '24m' (504 days), or '60m' (1260 days)"),
     end_date: date = Query(default=None),
 ):
     """
@@ -118,8 +125,8 @@ def get_corr_heatmap(
     Returns a flat list of (symbol_1, symbol_2, corr_value) records covering
     all pairs including the diagonal (self-correlation = 1.0).
     """
-    if period not in ("1m", "6m"):
-        raise HTTPException(status_code=400, detail="period must be '1m' or '6m'")
+    if period not in ("6m", "12m", "24m", "60m"):
+        raise HTTPException(status_code=400, detail="period must be '6m', '12m', '24m', or '60m'")
     if end_date is None:
         end_date = date.today()
 

@@ -23,10 +23,10 @@ def _get_connection():
     )
 
 
-def fetch_prices(sym_a: str, sym_b: str) -> tuple[pd.Series, pd.Series]:
-    """Return latest 1-year adj_close Series for sym_a and sym_b, aligned by date."""
+def fetch_prices(sym_a: str, sym_b: str, days: int = 365) -> tuple[pd.Series, pd.Series]:
+    """Return adj_close Series for sym_a and sym_b over the past `days` calendar days."""
     end = date.today()
-    start = end - timedelta(days=365)
+    start = end - timedelta(days=days)
     conn = _get_connection()
     try:
         cur = conn.cursor()
@@ -100,32 +100,44 @@ def run_engle_granger(series_a: pd.Series, series_b: pd.Series) -> dict:
 
 
 def run_all(sym_a: str, sym_b: str) -> dict:
-    """Run cointegration analysis on the latest 1 year of data, split into 4 quarters.
+    """Run cointegration analysis.
 
-    The past year is divided into 4 equal quarterly windows (oldest = Q1, most recent = Q4).
-    Each quarter produces its own EG p-value (both directions). The headline p-value per
-    quarter is the primary direction (lower of the two). Pass condition per quarter: p < 0.05.
-
-    Also runs ADF on the full-year series (prerequisite check) and full-year EG for the
-    spread charts shown in the detailed sections.
+    ADF prerequisite check and full EG spread charts use 5-year price history.
+    Quarterly EG p-values use the past 1 year, split into 4 equal windows.
     """
-    series_a, series_b = fetch_prices(sym_a, sym_b)
+    # 5-year series: ADF + full EG spread charts
+    series_a_5yr, series_b_5yr = fetch_prices(sym_a, sym_b, days=365 * 5)
 
-    # Full-year ADF (prerequisite: both series should be non-stationary)
-    adf_a = run_adf(series_a, sym_a)
-    adf_b = run_adf(series_b, sym_b)
+    adf_a = run_adf(series_a_5yr, sym_a)
+    adf_b = run_adf(series_b_5yr, sym_b)
 
-    # Full-year EG for spread charts in the detail section
-    eg_ab_full = run_engle_granger(series_a, series_b)
-    eg_ba_full = run_engle_granger(series_b, series_a)
-    if eg_ab_full["p_value"] <= eg_ba_full["p_value"]:
-        eg_primary, eg_rev = eg_ab_full, eg_ba_full
+    eg_ab_5yr = run_engle_granger(series_a_5yr, series_b_5yr)
+    eg_ba_5yr = run_engle_granger(series_b_5yr, series_a_5yr)
+    if eg_ab_5yr["p_value"] <= eg_ba_5yr["p_value"]:
+        eg_primary, eg_rev = eg_ab_5yr, eg_ba_5yr
         eg_direction = f"{sym_a}→{sym_b}"
         eg_rev_direction = f"{sym_b}→{sym_a}"
     else:
-        eg_primary, eg_rev = eg_ba_full, eg_ab_full
+        eg_primary, eg_rev = eg_ba_5yr, eg_ab_5yr
         eg_direction = f"{sym_b}→{sym_a}"
         eg_rev_direction = f"{sym_a}→{sym_b}"
+
+    # 2-year series: additional EG spread charts
+    series_a_2yr, series_b_2yr = fetch_prices(sym_a, sym_b, days=365 * 2)
+
+    eg_ab_2yr = run_engle_granger(series_a_2yr, series_b_2yr)
+    eg_ba_2yr = run_engle_granger(series_b_2yr, series_a_2yr)
+    if eg_ab_2yr["p_value"] <= eg_ba_2yr["p_value"]:
+        eg_primary_2yr, eg_rev_2yr = eg_ab_2yr, eg_ba_2yr
+        eg_direction_2yr = f"{sym_a}→{sym_b}"
+        eg_rev_direction_2yr = f"{sym_b}→{sym_a}"
+    else:
+        eg_primary_2yr, eg_rev_2yr = eg_ba_2yr, eg_ab_2yr
+        eg_direction_2yr = f"{sym_b}→{sym_a}"
+        eg_rev_direction_2yr = f"{sym_a}→{sym_b}"
+
+    # 1-year series: quarterly EG analysis (unchanged)
+    series_a, series_b = fetch_prices(sym_a, sym_b, days=365)
 
     # Split into 4 quarterly windows and run EG on each
     n = len(series_a)
@@ -171,6 +183,10 @@ def run_all(sym_a: str, sym_b: str) -> dict:
         "eg_direction": eg_direction,
         "eg_reverse": eg_rev,
         "eg_reverse_direction": eg_rev_direction,
+        "eg_2yr": eg_primary_2yr,
+        "eg_direction_2yr": eg_direction_2yr,
+        "eg_reverse_2yr": eg_rev_2yr,
+        "eg_reverse_direction_2yr": eg_rev_direction_2yr,
         "quarters": quarters,
         "quarters_passing": quarters_passing,
         "pair_passes": pair_passes,

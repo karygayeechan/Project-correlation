@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations, stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, runs quarterly cointegration tests (4 p-values over the past year), and executes pairs-trading signals with a quarterly-fixed hedge ratio.
+Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations (6m/12m/24m), stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, runs cointegration tests on 5-year and 2-year data (bidirectional EG + quarterly 1-year p-values), and executes pairs-trading signals with a quarterly-fixed hedge ratio.
 
 ## Environment Setup
 
@@ -50,7 +50,7 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 
 **ETL pipeline:**
 - `etl/extract.py` — fetches 5 years OHLCV for NVDA, GOOGL, AVGO, ARM, TSM via yfinance
-- `etl/transform.py` — reshapes wide → long; `compute_correlations()` produces 1m/6m Pearson pairs
+- `etl/transform.py` — reshapes wide → long; `compute_correlations()` produces **6m/12m/24m** Pearson pairs (1m removed)
 - `etl/load.py` — inserts companies, prices, upserts correlations, writes etl_log (no longer archives snapshots or calls commentary agent)
 
 **Regime Detection Agent (`Regime detection agent/`):**
@@ -60,14 +60,26 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 - `PLAN.md` — indicator sources, all alert rules with thresholds, architecture decisions
 
 **API:**
-- `api/main.py` — FastAPI backend with 10 endpoints; `app/db.py` is the query layer
+- `api/main.py` — FastAPI backend with 11+ endpoints including `/prices/latest-date`; `app/db.py` is the query layer. Period parameter accepts `6m`, `12m`, `24m`, `60m`.
 
 **Dashboard:**
 - `app/streamlit_app.py` — 6-tab Streamlit dashboard: Correlation (sub-tabs: Heatmap / Rolling / Network Graph), Cointegration, Trading Signals (+ hypothetical 5-year PnL), Backtest (4yr/1yr), Regime Alerts, Manage Tickers
+- **Auto-ETL on startup**: on first load of each browser session, checks `/prices/latest-date`; if data is stale on a weekday, runs ETL for all DB tickers automatically before rendering tabs
 - `app/api_client.py` — HTTP client so Streamlit never touches the DB directly
 
+**Correlation tab (sub-tabs):**
+- **Heatmap** — period radio: **6m / 12m / 24m** (default 24m); ranked pairs table shows all three period columns (24m r → 12m r → 6m r), sorted by selected period
+- **Rolling** — fixed **90-day rolling window** displayed over a **5-year span** (always pinned to `date.today()` regardless of sidebar); title reads "Rolling Correlation 5yr (90d window)"
+- **Network Graph** — period radio: **24m / 60m** (default 24m); minimum |r| threshold default **0.65**
+
 **Cointegration (`Cointegration test/`):**
-- `cointegration.py` — fetches the latest 1 year of data; splits into **4 equal quarterly windows**; runs ADF on each full-year series (prerequisite) and Engle-Granger in **both directions** (A→B and B→A) on each quarter; reports 4 EG p-values (one per quarter) with pass/fail; primary direction = lower p-value; full-year spread charts shown for context. Default pair: ARM/TSM.
+- `cointegration.py` — three fetch windows:
+  - **5-year** (`days=365*5`): ADF prerequisite check (displayed as a compact banner, not a full table) + bidirectional EG spread charts
+  - **2-year** (`days=365*2`): additional bidirectional EG spread charts
+  - **1-year** (`days=365`): quarterly split into 4 equal windows (~63 trading days each) for EG p-values
+- Each EG section shows both directions (primary ★ = lower p-value, reverse); spread chart titles explicitly state the data period (e.g. `Spread (5yr): ARM→TSM`)
+- Quarterly cards show both directions with explicit "X regressed on Y" labels and ★ on the primary direction
+- ADF results hidden unless a series IS stationary (unexpected) — then an alert banner is shown
 - `conclusions.py` — plain-English verdict strings for each test result
 
 **Trading Signals (`Trading signals/`):**
@@ -82,12 +94,14 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 
 **Database:**
 - 7 tables: `companies`, `company_details`, `stock_prices`, `correlations`, `correlation_history` (kept in schema, no longer written to by ETL), `correlation_alerts` (stores regime commentary), `etl_log`
+- `correlations.period` constraint: `CHECK (period IN ('6m', '12m', '24m'))` — 1m removed
 
 ## Architecture Decisions
 
 - **Surrogate SERIAL keys** for companies — ticker symbols can change (FB→META); integer PKs are stable
-- **Precomputed correlations** stored in `correlations` table — avoids recomputing on every Streamlit render
+- **Precomputed correlations** stored in `correlations` table — avoids recomputing on every Streamlit render; periods are 6m/12m/24m
 - **Idempotent ETL** — all inserts use `ON CONFLICT DO NOTHING`; safe to re-run
+- **Auto-ETL on Streamlit startup** — `st.session_state["etl_auto_refreshed"]` ensures the ETL runs once per browser session on weekdays if `latest price date < today`; uses `/prices/latest-date` endpoint for the staleness check; never blocks the dashboard if ETL fails
 - **Regime commentary is on-demand, not ETL-triggered** — fetching 100+ tickers for NDX breadth takes ~30–60s; running that on every ETL would be prohibitive. Commentary is generated when the user clicks the button in Streamlit; one entry per calendar day is cached in `correlation_alerts`.
 - **QQQ as trading-calendar reference** — `^TNX` and `^VIX` trade on CBOE holidays when equities are closed. Filtering `close[close["QQQ"].notna()]` removes those extra rows before any rolling window calculations, preventing NaN contamination of the 200DMA and z-score.
 - **DMA_BUFFER = 400 calendar days** — the 252-day SMH/QQQ z-score needs 252 trading days of warmup. 400 calendar days ≈ 276 trading days, enough to keep the z-score valid across the entire 1-year display window.
@@ -116,7 +130,7 @@ Files to keep in sync:
 
 - **yfinance column naming**: extract.py flattens multi-level column tuples to strings like `"Close AAPL"` (space-separated). transform.py splits on spaces to parse ticker and field. Any yfinance output format change breaks both files.
 - **Hardcoded tickers**: `TICKERS` list is duplicated in both extract.py and transform.py — keep them in sync.
-- **Correlation windows**: "1m" ≈ 21 trading days, "6m" ≈ 126 trading days. Sort by date before computing daily returns.
+- **Correlation windows**: "6m" ≈ 126 trading days, "12m" ≈ 252, "24m" ≈ 504, "60m" ≈ 1260. 1m was removed. Sort by date before computing daily returns.
 - **No test suite** — use each module's `if __name__ == "__main__"` block to smoke-test during development.
 - **Cointegration / Trading Signals / Backtest / Regime Detection modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, `Backtest/`, and `Regime detection agent/` are added to `sys.path` at the top of `streamlit_app.py` and `api/main.py` — if you move them, update those `sys.path.insert` calls.
 - **Trading Signals uses `st.session_state`**: results from the Trading Signals tab are stored under `st.session_state["ts_df"]` so the Daily PnL tab can read them without recomputing. If the user navigates to Daily PnL before running signals, they see a prompt to compute first.
@@ -125,3 +139,5 @@ Files to keep in sync:
 - **FRED API 1-day lag**: FRED publishes TIPS yield (`DFII10`) with a 1-business-day delay. The most recent row in `tips_10y` is frequently NaN — this is expected; the dashboard displays "N/A" for that cell.
 - **Regime indicator cache TTL = 1 hour**: `_regime_indicators()` in Streamlit is cached for 3600s. First load takes ~30–60s (100+ tickers + FRED). The Refresh button calls `st.cache_data.clear()` to force a reload.
 - **NDX-100 component list is hardcoded** in `data_collector.py` — update it when the index rebalances quarterly. Delisted tickers (e.g. WBA, ANSS) cause yfinance warnings but do not break the breadth computation; they are simply excluded from the count.
+- **Streamlit does not auto-reload modules outside `app/`** — edits to `Cointegration test/cointegration.py`, `Trading signals/trading_signals.py`, etc. require a Streamlit server restart (`pkill -f "streamlit run"`) to take effect; the file watcher only watches `app/`.
+- **Rolling correlation always uses `date.today()` as end date** — `rc_end = date.today()` and `rc_start = rc_end - timedelta(days=1900)` are hardcoded in the Rolling sub-tab, independent of the sidebar date range picker.

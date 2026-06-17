@@ -36,6 +36,27 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── Auto-refresh: run ETL once per session if data is stale ─────────────────
+if "etl_auto_refreshed" not in st.session_state:
+    st.session_state["etl_auto_refreshed"] = False
+
+if not st.session_state["etl_auto_refreshed"]:
+    try:
+        latest = db.get_latest_price_date()
+        today = date.today()
+        # On weekdays, refresh if data isn't from today.
+        # On weekends, Friday data is current — skip.
+        is_weekday = today.weekday() < 5
+        data_is_stale = latest is None or (is_weekday and latest < today)
+        if data_is_stale:
+            all_tickers = db.get_tickers()
+            with st.spinner(f"Refreshing market data for {len(all_tickers)} tickers…"):
+                etl_run(tickers=all_tickers if all_tickers else None)
+            st.cache_data.clear()
+    except Exception:
+        pass  # Never block the dashboard if auto-refresh fails
+    st.session_state["etl_auto_refreshed"] = True
+
 # ─── Cached DB query wrappers ─────────────────────────────────────────────────
 # Lists must be converted to tuples for st.cache_data hashability.
 
@@ -160,8 +181,8 @@ with tab_corr:
         if len(selected) < 2:
             st.info("Select at least 2 tickers in the sidebar.")
         else:
-            period = st.radio("Period", ["1m", "6m"], horizontal=True, key="heat_period",
-                              help="1m = last 21 trading days, 6m = last 126")
+            period = st.radio("Period", ["6m", "12m", "24m"], index=2, horizontal=True, key="heat_period",
+                              help="6m = last 126 trading days, 12m = last 252, 24m = last 504")
 
             with st.spinner("Computing correlations..."):
                 corr_mat = _corr_heatmap(tuple(sorted(selected)), period, end_date)
@@ -198,12 +219,25 @@ with tab_corr:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
+                # Build ranked pairs table with all three periods; sort by selected period
+                ticker_tuple = tuple(sorted(selected))
+                with st.spinner("Loading all periods for ranked pairs..."):
+                    mat_6m  = _corr_heatmap(ticker_tuple, "6m",  end_date)
+                    mat_12m = _corr_heatmap(ticker_tuple, "12m", end_date)
+                    mat_24m = _corr_heatmap(ticker_tuple, "24m", end_date)
+
                 pairs = []
                 for i in range(len(labels)):
                     for j in range(i + 1, len(labels)):
-                        pairs.append({"Pair": f"{labels[i]} / {labels[j]}", "r": round(z[i][j], 4)})
+                        a, b = labels[i], labels[j]
+                        r6  = round(float(mat_6m.loc[a, b]),  4) if not mat_6m.empty  else None
+                        r12 = round(float(mat_12m.loc[a, b]), 4) if not mat_12m.empty else None
+                        r24 = round(float(mat_24m.loc[a, b]), 4) if not mat_24m.empty else None
+                        pairs.append({"Pair": f"{a} / {b}", "24m r": r24, "12m r": r12, "6m r": r6})
+
                 if pairs:
-                    pairs_df = pd.DataFrame(pairs).sort_values("r", ascending=False, key=abs)
+                    sort_col = {"6m": "6m r", "12m": "12m r", "24m": "24m r"}[period]
+                    pairs_df = pd.DataFrame(pairs).sort_values(sort_col, ascending=False, key=abs)
                     st.subheader("Ranked Pairs")
                     st.dataframe(pairs_df, use_container_width=True, hide_index=True)
 
@@ -218,7 +252,7 @@ with tab_corr:
         if len(selected) < 2:
             st.info("Select at least 2 tickers in the sidebar.")
         else:
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1:
                 rc_default_a = "ARM" if "ARM" in selected else selected[0]
                 rc_sym1 = st.selectbox("Ticker 1", selected, index=selected.index(rc_default_a), key="rc_sym1")
@@ -226,14 +260,13 @@ with tab_corr:
                 other = [t for t in selected if t != rc_sym1]
                 rc_default_b = "TSM" if "TSM" in other else other[0]
                 rc_sym2 = st.selectbox("Ticker 2", other or selected, index=(other or selected).index(rc_default_b) if rc_default_b in (other or selected) else 0, key="rc_sym2")
-            with c3:
-                window_label = st.selectbox(
-                    "Window", ["1m (21d)", "2m (42d)", "3m (63d)", "6m (126d)"], key="rc_window"
-                )
-            window_days = {"1m (21d)": 21, "2m (42d)": 42, "3m (63d)": 63, "6m (126d)": 126}[window_label]
+            # Always pin to today so the chart stays current regardless of sidebar date range
+            window_days = 90
+            rc_end = date.today()
+            rc_start = rc_end - timedelta(days=1900)  # ~5.2 years of history
 
             with st.spinner("Loading rolling correlation..."):
-                roll = _rolling_corr(rc_sym1, rc_sym2, start_date, end_date, window_days)
+                roll = _rolling_corr(rc_sym1, rc_sym2, rc_start, rc_end, window_days)
 
             valid = roll.dropna()
             if valid.empty:
@@ -255,7 +288,7 @@ with tab_corr:
                     fillcolor="rgba(33,150,243,0.10)",
                 ))
                 fig.update_layout(
-                    title=f"Rolling {window_label} Correlation: {rc_sym1} vs {rc_sym2}  ({start_date} → {end_date})",
+                    title=f"Rolling Correlation 5yr (90d window): {rc_sym1} vs {rc_sym2}  ({rc_start} → {rc_end})",
                     yaxis=dict(title="Pearson r", range=[-1.05, 1.05]),
                     xaxis=dict(title="Date"),
                     height=420,
@@ -282,8 +315,8 @@ with tab_corr:
         else:
             nc1, nc2 = st.columns([1, 3])
             with nc1:
-                net_period = st.radio("Period", ["1m", "6m"], key="net_period")
-                threshold = st.slider("Min |r| to show edge", 0.0, 1.0, 0.2, 0.05)
+                net_period = st.radio("Period", ["24m", "60m"], index=0, key="net_period")
+                threshold = st.slider("Min |r| to show edge", 0.0, 1.0, 0.65, 0.05)
 
             with st.spinner("Building network..."):
                 net_mat = _corr_heatmap(tuple(sorted(selected)), net_period, end_date)
@@ -327,7 +360,7 @@ with tab_corr:
                 ))
 
                 fig.update_layout(
-                    title=f"Correlation Network  ({net_period}, |r| ≥ {threshold})",
+                    title=f"Correlation Network  ({net_period}, |r| ≥ {threshold:.2f})",
                     xaxis=dict(visible=False, range=[-1.4, 1.4]),
                     yaxis=dict(visible=False, range=[-1.4, 1.4]),
                     height=520,
@@ -372,47 +405,41 @@ with tab_coint:
         if cr:
             st.markdown("---")
 
-            # ── Section 1: Individual ADF Tests ──────────────────────────────
-            st.subheader("Step 1 — ADF Test on Individual Price Series")
-            st.caption("Is each series non-stationary? (p > 0.05 → non-stationary ✓ → required for cointegration)")
+            # ── Section 1: ADF prerequisite banner (5-year basis) ────────────
+            adf_results = [cr["adf_a"], cr["adf_b"]]
+            stationary = [r for r in adf_results if r["is_stationary"]]
+            non_stationary = [r for r in adf_results if not r["is_stationary"]]
 
-            for adf_res in [cr["adf_a"], cr["adf_b"]]:
-                with st.container(border=True):
-                    st.markdown(f"**ADF Test: {adf_res['label']}**")
-                    am1, am2, am3, am4, am5 = st.columns(5)
-                    am1.metric("Test Statistic", f"{adf_res['stat']:.4f}")
-                    am2.metric("P-Value", f"{adf_res['p_value']:.4f}")
-                    am3.metric("Crit 1%", f"{adf_res['critical_values']['1%']:.4f}")
-                    am4.metric("Crit 5%", f"{adf_res['critical_values']['5%']:.4f}")
-                    am5.metric("Crit 10%", f"{adf_res['critical_values']['10%']:.4f}")
-                    verdict = adf_res["verdict"]
-                    conclusion = adf_conclusion(adf_res["is_stationary"])
-                    if adf_res["is_stationary"]:
-                        st.warning(f"{verdict} {conclusion}")
-                    else:
-                        st.success(f"{verdict} {conclusion}")
+            if not stationary:
+                st.success(
+                    f"✓ **{coint_sym_a}** (ADF p={cr['adf_a']['p_value']:.4f}) and "
+                    f"**{coint_sym_b}** (ADF p={cr['adf_b']['p_value']:.4f}) are both "
+                    "non-stationary over the past 5 years — proceeding to Engle-Granger test."
+                )
+            else:
+                for r in stationary:
+                    st.warning(
+                        f"⚠️ Alert: **{r['label']}** is stationary (ADF p={r['p_value']:.4f} < 0.05). "
+                        "Cointegration requires non-stationary individual series — interpret results with caution."
+                    )
+                for r in non_stationary:
+                    st.info(f"**{r['label']}** is non-stationary (ADF p={r['p_value']:.4f}).")
+                st.info("Proceeding to Engle-Granger test.")
 
             st.markdown("---")
 
             # ── Section 2: Engle-Granger (both directions) ───────────────────
-            st.subheader("Step 2 — Engle-Granger Test (both directions)")
+            st.subheader("Engle-Granger Test (both directions)")
             st.caption(
                 "EG is not symmetric: regressing A on B vs B on A can produce different residuals "
-                "and flip the verdict. Both directions are shown. The primary direction (lower p-value) "
-                "drives the final verdict."
+                "and flip the verdict. The primary direction (lower p-value) drives the final verdict."
             )
 
-            for eg_res, eg_dir, is_primary in [
-                (cr["eg"],         cr["eg_direction"],         True),
-                (cr["eg_reverse"], cr["eg_reverse_direction"], False),
-            ]:
+            def _render_eg_pair(eg_res, eg_dir, is_primary, period_label, line_color):
                 dep, indep = eg_dir.split("→")
-                badge = "**★ Primary direction**" if is_primary else "**Reverse direction**"
-                line_color = "#2196F3" if is_primary else "#9C27B0"
-
+                badge = "★ Primary direction" if is_primary else "Reverse direction"
                 with st.container(border=True):
-                    st.markdown(f"{badge} — `{dep}` regressed on `{indep}`")
-
+                    st.markdown(f"**{badge} — `{dep}` regressed on `{indep}`**")
                     bm1, bm2 = st.columns(2)
                     bm1.metric("Intercept α", f"{eg_res['alpha']:.4f}",
                                help=f"ϵt = {dep} − (α + β·{indep})")
@@ -431,7 +458,7 @@ with tab_coint:
                     fig_s.add_hline(y=spread_mean + spread_std, line=dict(color="#e53935", dash="dot", width=1), annotation_text="+1σ")
                     fig_s.add_hline(y=spread_mean - spread_std, line=dict(color="#e53935", dash="dot", width=1), annotation_text="-1σ")
                     fig_s.update_layout(
-                        title=f"Spread: {eg_dir}",
+                        title=f"Spread ({period_label}): {eg_dir}  [{spread.index[0].strftime('%b %Y')} → {spread.index[-1].strftime('%b %Y')}]",
                         xaxis_title="Date", yaxis_title="Spread",
                         height=300, margin=dict(t=50),
                     )
@@ -449,14 +476,24 @@ with tab_coint:
                     else:
                         st.error(f"{eg_res['verdict']} {eg_conc}")
 
+            st.markdown("##### Past 5 Years")
+            _render_eg_pair(cr["eg"],         cr["eg_direction"],         True,  "5yr", "#2196F3")
+            _render_eg_pair(cr["eg_reverse"], cr["eg_reverse_direction"], False, "5yr", "#9C27B0")
+
+            st.markdown("---")
+            st.markdown("##### Past 2 Years")
+            _render_eg_pair(cr["eg_2yr"],         cr["eg_direction_2yr"],         True,  "2yr", "#00897B")
+            _render_eg_pair(cr["eg_reverse_2yr"], cr["eg_reverse_direction_2yr"], False, "2yr", "#F57C00")
+
             st.markdown("---")
 
             # ── Section 3: Quarterly P-Values ─────────────────────────────────
             st.subheader("Quarterly Cointegration P-Values — Past 1 Year")
             st.caption(
                 "The past year is split into 4 equal quarters (Q1 = oldest, Q4 = most recent). "
-                "Each quarter runs Engle-Granger in both directions; the primary p-value is the "
-                "lower of the two. Pass condition: p < 0.05 (spread is stationary → cointegrated)."
+                "Each quarter runs Engle-Granger in both directions. "
+                "★ marks the primary direction (lower p-value), which determines pass/fail. "
+                "Pass condition: p < 0.05."
             )
 
             q_cols = st.columns(4)
@@ -467,16 +504,21 @@ with tab_coint:
                         end_str   = q["end_date"].strftime("%b %d %Y")
                         st.markdown(f"**{q['label']}**")
                         st.caption(f"{start_str} → {end_str}")
-                        st.metric(
-                            "EG p-value",
-                            f"{q['primary_p']:.4f}",
-                            help=f"Primary direction: {q['primary_direction']}",
-                        )
-                        # Both directions
-                        st.caption(
-                            f"{coint_sym_a}→{coint_sym_b}: p={q['eg_ab']['p_value']:.4f}  "
-                            f"{coint_sym_b}→{coint_sym_a}: p={q['eg_ba']['p_value']:.4f}"
-                        )
+
+                        p_ab = q["eg_ab"]["p_value"]
+                        p_ba = q["eg_ba"]["p_value"]
+                        ab_is_primary = p_ab <= p_ba
+
+                        # Direction A→B
+                        ab_label = f"{'★ ' if ab_is_primary else ''}{coint_sym_a} regressed on {coint_sym_b}"
+                        st.markdown(f"<small>{ab_label}</small>", unsafe_allow_html=True)
+                        st.metric("p-value", f"{p_ab:.4f}", label_visibility="collapsed")
+
+                        # Direction B→A
+                        ba_label = f"{'★ ' if not ab_is_primary else ''}{coint_sym_b} regressed on {coint_sym_a}"
+                        st.markdown(f"<small>{ba_label}</small>", unsafe_allow_html=True)
+                        st.metric("p-value", f"{p_ba:.4f}", label_visibility="collapsed")
+
                         if q["passes"]:
                             st.success("Cointegrated ✓")
                         else:

@@ -1,42 +1,84 @@
-1. First run ADF tests and conclude: Is this series stationary?
+Three data periods are used. Each serves a distinct purpose. All windows end on today's date.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — ADF TEST  |  Data period: PAST 5 YEARS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Stationary means: constant mean; constant variance; doesn't wander indefinitely.
 
-Run ADF twice — once for stock A and once for stock B — on the full 1-year price series.
+Run ADF twice — once for stock A and once for stock B — on the past 5 years of price data.
 Interpretation: p < 0.05 = stationary; p > 0.05 = non-stationary.
 If non-stationary: give it a check mark ✓ (this is required for cointegration).
 If stationary: give it a question mark ? (unexpected for raw prices).
 
+Display as a compact banner, NOT a full metrics table:
+  - Both non-stationary (normal): show a single green success banner summarising both p-values.
+  - Any series stationary (unusual): show an amber warning alert naming the stationary ticker and
+    its p-value. Then show an info message for the non-stationary one. Alert the user that
+    cointegration results may not be reliable.
 
-2. Second, run the Engle-Granger cointegration test per quarter.
 
-The past 1 year of daily price data is divided into 4 equal quarterly windows:
-  Q1 = oldest quarter, Q2, Q3, Q4 = most recent quarter (~63 trading days each).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2 — ENGLE-GRANGER SPREAD CHARTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-For each quarter, run Engle-Granger in BOTH directions:
+Run Engle-Granger in BOTH directions, for TWO separate data periods: 5 years and 2 years.
+This produces four spread charts in total.
 
-Direction A→B:
-   1) Regress A on B: compute α and β (hedge ratio — how many units of B match 1 unit of A)
+For each direction and each data period:
+   1) Regress A on B (or B on A): compute α (intercept) and β (hedge ratio)
    2) Compute residuals: ϵ = A − (α + β·B)
    3) Run ADF on residuals
    Interpretation: p < 0.05 = cointegrated (spread is stationary); p > 0.05 = not cointegrated
 
-Direction B→A:
-   Same procedure with A and B swapped.
+Primary direction per window = the direction (A→B or B→A) with the lower p-value.
+The primary direction is determined independently for each data period — it may differ between
+the 5-year and 2-year windows.
 
-Primary p-value for each quarter = the lower of the two direction p-values (stronger signal).
+Chart order on dashboard:
+   [Past 5 Years heading]
+   Chart 1: ★ Primary direction  —  Spread (5yr): TICKER_A→TICKER_B  [start → end]
+   Chart 2:   Reverse direction  —  Spread (5yr): TICKER_B→TICKER_A  [start → end]
+   --- separator ---
+   [Past 2 Years heading]
+   Chart 3: ★ Primary direction  —  Spread (2yr): TICKER_A→TICKER_B  [start → end]
+   Chart 4:   Reverse direction  —  Spread (2yr): TICKER_B→TICKER_A  [start → end]
+
+Each chart shows:
+   - Spread (residuals) over time with ±1σ bands and mean line
+   - α (intercept), β (hedge ratio)
+   - ADF test statistic, p-value, critical values (1% / 5% / 10%)
+   - Verdict: Cointegrated ✓ or Not cointegrated ✗
+
+The data period must be stated explicitly in each chart title (5yr or 2yr) along with the
+exact date range (e.g. "Jun 2021 → Jun 2026").
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3 — QUARTERLY P-VALUES  |  Data period: PAST 1 YEAR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The past 1 year of daily price data is divided into 4 equal quarterly windows:
+  Q1 = oldest quarter, Q2, Q3, Q4 = most recent quarter (~63 trading days each).
+
+For each quarter, run Engle-Granger in BOTH directions and display BOTH p-values explicitly,
+labelled with which ticker is regressed on which:
+
+   ★ TICKER_A regressed on TICKER_B  →  p-value
+     TICKER_B regressed on TICKER_A  →  p-value
+
+★ marks the primary direction (the lower p-value). The primary drives the pass/fail verdict.
 Pass condition per quarter: primary p-value < 0.05.
 
+Output: 4 quarter cards side by side (Q1 = oldest, Q4 = most recent):
+   Q1: date range | both direction p-values (labelled) | Cointegrated ✓ or Not cointegrated ✗
+   Q2: same structure
+   Q3: same structure
+   Q4: same structure
 
-3. Output: 4 p-values, one per quarter
-
-Report exactly four headline p-values — one per quarterly window:
-   Q1 (oldest) : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
-   Q2          : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
-   Q3          : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
-   Q4 (recent) : EG primary p-value  →  pass if p < 0.05  ✓ / ✗
-
-Also display both direction p-values (A→B and B→A) within each quarter card for transparency.
+Below the cards:
+   "X/4 quarters passed" summary
+   Final PASS banner (all 4 pass) or FAIL banner (any quarter fails)
 
 The pair passes the full cointegration test only if ALL FOUR quarters pass (4/4).
-Report how many quarters passed (e.g. "2/4 quarters passed") even when the overall verdict is FAIL.
+Report how many quarters passed even when the overall verdict is FAIL.

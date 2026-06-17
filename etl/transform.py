@@ -24,7 +24,7 @@ def compute_correlations(long_df: pd.DataFrame) -> pd.DataFrame:
     pivot = df.pivot(index="date", columns="symbol", values="daily_return")
     pivot.columns.name = None
 
-    periods = {"1m": 21, "6m": 126}
+    periods = {"6m": 126, "12m": 252, "24m": 504}
     frames = []
 
     for period_name, n_days in periods.items():

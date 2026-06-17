@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS correlations (
     id            SERIAL PRIMARY KEY,
     company_id_1  INT NOT NULL REFERENCES companies(id),
     company_id_2  INT NOT NULL REFERENCES companies(id),
-    period        VARCHAR(10) NOT NULL CHECK (period IN ('1m', '6m')),
+    period        VARCHAR(10) NOT NULL CHECK (period IN ('6m', '12m', '24m')),
     corr_value    NUMERIC(6, 4) CHECK (corr_value BETWEEN -1 AND 1),
     calculated_at TIMESTAMP DEFAULT NOW(),
     UNIQUE (company_id_1, company_id_2, period)
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS correlation_history (
     id            SERIAL PRIMARY KEY,
     company_id_1  INT NOT NULL REFERENCES companies(id),
     company_id_2  INT NOT NULL REFERENCES companies(id),
-    period        VARCHAR(10) NOT NULL CHECK (period IN ('1m', '6m')),
+    period        VARCHAR(10) NOT NULL CHECK (period IN ('6m', '12m', '24m')),
     corr_value    NUMERIC(6, 4) CHECK (corr_value BETWEEN -1 AND 1),
     snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
     UNIQUE (company_id_1, company_id_2, period, snapshot_date)

@@ -18,6 +18,17 @@ def get_connection():
     )
 
 
+def get_latest_price_date():
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(date) FROM stock_prices")
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def get_tickers() -> list[str]:
     conn = get_connection()
     try:
@@ -60,7 +71,7 @@ def get_corr_heatmap(tickers: list[str], period: str, end_date) -> pd.DataFrame:
     if not tickers or len(tickers) < 2:
         return pd.DataFrame()
 
-    n_days = {"1m": 21, "6m": 126}[period]
+    n_days = {"6m": 126, "12m": 252, "24m": 504, "60m": 1260}[period]
     lookback = end_date - timedelta(days=n_days * 3)
 
     prices = get_stock_prices(tickers, lookback, end_date)
