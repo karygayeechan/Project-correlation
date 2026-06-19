@@ -1,0 +1,159 @@
+"""
+On-demand Claude API agent for fundamental comparison briefing.
+Entry point: generate_fundamental_commentary(data_a, data_b, alerts) -> str
+"""
+import os
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _v(df: pd.DataFrame, col: str, idx: int = 0) -> float:
+    if df.empty or col not in df.columns:
+        return float("nan")
+    try:
+        return float(df[col].iloc[idx])
+    except (IndexError, TypeError, ValueError):
+        return float("nan")
+
+
+def _pct(new, old) -> float | None:
+    if pd.isna(new) or pd.isna(old) or old == 0:
+        return None
+    return (new - old) / abs(old)
+
+
+def _fmt(val, mode: str) -> str:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return "N/A"
+    if mode == "B":
+        return f"${val:.2f}B"
+    if mode == "pct":
+        return f"{val*100:.1f}%"
+    if mode == "ratio":
+        return f"{val:.2f}x"
+    if mode == "eps":
+        return f"${val:.2f}"
+    if mode == "days":
+        return f"{val:.0f}d"
+    return f"{val:.3f}"
+
+
+def _delta(new, old) -> str:
+    chg = _pct(new, old)
+    if chg is None:
+        return ""
+    sign = "+" if chg >= 0 else ""
+    return f" ({sign}{chg*100:.0f}% QoQ)"
+
+
+def _build_block(data: dict, symbol: str) -> str:
+    income   = data.get("income",   pd.DataFrame())
+    cashflow = data.get("cashflow", pd.DataFrame())
+    derived  = data.get("derived",  pd.DataFrame())
+    q_curr   = (data.get("quarters") or ["Latest"])[0]
+    ccy      = data.get("currency", "USD")
+    ccy_note = f" [{ccy}]" if ccy != "USD" else ""
+
+    rev  = _v(income,   "Revenue",          0); rev1  = _v(income,   "Revenue",  1)
+    ni   = _v(income,   "Net Income",        0); ni1   = _v(income,   "Net Income", 1)
+    fcf  = _v(cashflow, "FCF",               0); fcf1  = _v(cashflow, "FCF",      1)
+    gm   = _v(derived,  "Gross Margin",      0)
+    om   = _v(derived,  "Operating Margin",  0)
+    nm   = _v(derived,  "Net Margin",        0)
+    de   = _v(derived,  "D/E Ratio",         0)
+    cr   = _v(derived,  "Current Ratio",     0)
+    ocf_ni  = _v(derived, "OCF/NI",          0)
+    accrual = _v(derived, "Accrual Ratio",   0)
+
+    lines = [
+        f"  {symbol}{ccy_note} — {q_curr}",
+        f"  Revenue:      {_fmt(rev,'B')}{_delta(rev, rev1)}",
+        f"  Net Income:   {_fmt(ni,'B')}{_delta(ni, ni1)}",
+        f"  FCF:          {_fmt(fcf,'B')}{_delta(fcf, fcf1)}",
+        f"  Margins (GM/OM/NM): {_fmt(gm,'pct')} / {_fmt(om,'pct')} / {_fmt(nm,'pct')}",
+        f"  D/E: {_fmt(de,'ratio')}   Current Ratio: {_fmt(cr,'ratio')}",
+        f"  OCF/NI: {_fmt(ocf_ni,'ratio')}   Accrual Ratio: {_fmt(accrual,'ratio')}",
+    ]
+    return "\n".join(lines)
+
+
+def _alert_block(alert_list: list, header: str) -> str:
+    if not alert_list:
+        return f"{header}: none"
+    lines = [f"  [{a['severity']}] {a['message']}" for a in alert_list]
+    return header + ":\n" + "\n".join(lines)
+
+
+def generate_fundamental_commentary(data_a: dict, data_b: dict, alerts: list) -> str:
+    """
+    Call Claude claude-sonnet-4-6 to write a ~200-word fundamental comparison briefing.
+
+    Returns the text string directly (no DB writes).
+    Returns an error string if ANTHROPIC_API_KEY is not set.
+    """
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return "ANTHROPIC_API_KEY not set — cannot generate commentary."
+
+    from anthropic import Anthropic
+
+    sym_a = data_a.get("symbol", "A")
+    sym_b = data_b.get("symbol", "B")
+
+    block_a = _build_block(data_a, sym_a)
+    block_b = _build_block(data_b, sym_b)
+
+    pair_alerts   = [a for a in alerts if a.get("layer") == "pair"]
+    trend_a       = [a for a in alerts if a.get("layer") == "individual_trend" and a.get("stock") == sym_a]
+    trend_b       = [a for a in alerts if a.get("layer") == "individual_trend" and a.get("stock") == sym_b]
+    quality_a     = [a for a in alerts if a.get("layer") == "quality" and a.get("stock") == sym_a]
+    quality_b     = [a for a in alerts if a.get("layer") == "quality" and a.get("stock") == sym_b]
+
+    system = (
+        "You are a financial analyst assistant. "
+        "Your analysis must be grounded exclusively in the data supplied in the user message. "
+        "You have no access to the internet, live prices, news, earnings calls, analyst reports, "
+        "or any information beyond what is explicitly listed in KEY METRICS and ALERTS. "
+        "Do not invent, estimate, or infer any figure that is not present in the supplied data. "
+        "If a metric is N/A or missing, omit it rather than guessing. "
+        "Do not reference any external events, product launches, management commentary, "
+        "macro conditions, or market context that is not derived directly from the numbers provided."
+    )
+
+    prompt = f"""KEY METRICS (sourced from yfinance quarterly statements — all figures in $B unless noted):
+{block_a}
+
+{block_b}
+
+ALERTS (generated by rule-based checks on the same data):
+{_alert_block(pair_alerts,   f'Pair shifts ({sym_a} vs {sym_b})')}
+{_alert_block(trend_a,       f'{sym_a} trend')}
+{_alert_block(trend_b,       f'{sym_b} trend')}
+{_alert_block(quality_a,     f'{sym_a} quality flags')}
+{_alert_block(quality_b,     f'{sym_b} quality flags')}
+
+Write a ~200-word fundamental briefing covering:
+(a) which stock shows stronger fundamentals this quarter and why — cite only the figures above
+(b) the most significant pair-level shifts between the two
+(c) notable individual trend changes for either stock
+(d) any earnings quality red flags worth monitoring
+
+Style rules:
+- Base every statement exclusively on the KEY METRICS and ALERTS above — no external data
+- If a metric is N/A, omit it rather than estimating
+- Prioritise Critical alerts over Warning; omit Info unless nothing else is present
+- Use ticker names ({sym_a}, {sym_b}), not "Stock A / Stock B"
+- No boilerplate opening sentences
+- If either ticker reports in a non-USD currency, note that cross-stock dollar comparisons are not directly comparable"""
+
+    client = Anthropic()
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=400,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text.strip()

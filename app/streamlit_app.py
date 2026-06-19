@@ -29,6 +29,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Regime detecti
 from data_collector import fetch_indicators
 from regime_alerts import detect_alerts
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fundamental comparison agent"))
+from fundamental_data import fetch_fundamentals, INCOME_DISPLAY, BALANCE_DISPLAY, CASHFLOW_DISPLAY, DERIVED_DISPLAY
+from fundamental_alerts import detect_fundamental_alerts
+from fundamental_commentary import generate_fundamental_commentary
+
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Stock Correlation Dashboard",
@@ -101,6 +106,11 @@ def _regime_indicators(lookback_days: int = 365) -> pd.DataFrame:
     return fetch_indicators(lookback_days)
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def _fetch_fundamentals_cached(symbol: str) -> dict:
+    return fetch_fundamentals(symbol)
+
+
 def _clear_and_rerun():
     st.cache_data.clear()
     st.rerun()
@@ -157,6 +167,7 @@ with st.sidebar:
     tab_signals,
     tab_test,
     tab_alerts,
+    tab_fund,
     tab_manage,
 ) = st.tabs([
     "Correlation",
@@ -164,6 +175,7 @@ with st.sidebar:
     "Trading Signals",
     "Backtest (4yr/1yr)",
     "Regime Alerts",
+    "Fundamental Comparison",
     "Manage Tickers",
 ])
 
@@ -1143,6 +1155,300 @@ with tab_alerts:
         history = alerts_df[["generated_at", "corr_date", "commentary"]].copy()
         history.columns = ["Generated At", "Date", "Commentary"]
         st.dataframe(history, use_container_width=True, hide_index=True)
+
+# ─── Tab 7: Fundamental Comparison ───────────────────────────────────────────
+with tab_fund:
+    st.header("Fundamental Comparison")
+    st.caption(
+        "Compare quarterly financials (income statement, balance sheet, cash flow) for any two tickers. "
+        "Alerts fire on significant pair-level shifts, individual trend changes, and earnings quality red flags. "
+        "Data from yfinance — cached 6 hours. Currency note: TSM reports in TWD."
+    )
+
+    # ── Stock pickers ────────────────────────────────────────────────────────
+    fund_tickers = _tickers()
+    if not fund_tickers:
+        st.warning("No tickers in DB. Add tickers via Manage Tickers first.")
+    else:
+        _fd_default_a = "ARM" if "ARM" in fund_tickers else fund_tickers[0]
+        _fd_others    = [t for t in fund_tickers if t != _fd_default_a]
+        _fd_default_b = "TSM" if "TSM" in _fd_others else (_fd_others[0] if _fd_others else fund_tickers[0])
+
+        fd_c1, fd_c2, fd_c3 = st.columns([2, 2, 1])
+        with fd_c1:
+            fd_sym_a = st.selectbox(
+                "Stock A", fund_tickers,
+                index=fund_tickers.index(_fd_default_a),
+                key="fd_sym_a",
+            )
+        with fd_c2:
+            fd_b_opts = [t for t in fund_tickers if t != fd_sym_a]
+            fd_sym_b = st.selectbox(
+                "Stock B", fd_b_opts,
+                index=fd_b_opts.index(_fd_default_b) if _fd_default_b in fd_b_opts else 0,
+                key="fd_sym_b",
+            )
+        with fd_c3:
+            st.write("")
+            fd_load = st.button("Load Fundamentals", type="primary", key="fd_load")
+
+        if fd_load:
+            with st.spinner(f"Fetching quarterly fundamentals for {fd_sym_a} and {fd_sym_b}…"):
+                st.session_state["fd_data_a"]  = _fetch_fundamentals_cached(fd_sym_a)
+                st.session_state["fd_data_b"]  = _fetch_fundamentals_cached(fd_sym_b)
+                st.session_state["fd_loaded_a"] = fd_sym_a
+                st.session_state["fd_loaded_b"] = fd_sym_b
+                st.session_state.pop("fd_commentary", None)
+
+        if "fd_data_a" not in st.session_state:
+            st.info("Select two stocks above and click **Load Fundamentals** to begin.")
+        else:
+            fd_data_a   = st.session_state["fd_data_a"]
+            fd_data_b   = st.session_state["fd_data_b"]
+            fd_loaded_a = st.session_state.get("fd_loaded_a", fd_sym_a)
+            fd_loaded_b = st.session_state.get("fd_loaded_b", fd_sym_b)
+
+            if fd_loaded_a != fd_sym_a or fd_loaded_b != fd_sym_b:
+                st.info(f"Showing data for **{fd_loaded_a}** / **{fd_loaded_b}**. Click Load to refresh for current selection.")
+
+            if fd_data_a["n_quarters"] == 0 and fd_data_b["n_quarters"] == 0:
+                st.error("Could not fetch fundamentals for either ticker. Check yfinance connectivity.")
+            else:
+                # Currency warnings
+                for fd_d, fd_sym in [(fd_data_a, fd_loaded_a), (fd_data_b, fd_loaded_b)]:
+                    if fd_d.get("currency", "USD") not in ("USD", ""):
+                        st.warning(
+                            f"⚠️  **{fd_sym}** reports in **{fd_d['currency']}** — all figures are "
+                            f"in {fd_d['currency']} billions, not USD. Cross-stock comparisons are indicative only."
+                        )
+
+                # ── Helper: format a single metric value ─────────────────────
+                _EPS_COLS     = {"EPS (Basic)", "EPS (Diluted)"}
+                _PCT_COLS     = {"Gross Margin","Operating Margin","Net Margin","FCF Margin","R&D % Revenue"}
+                _RATIO_COLS   = {"D/E Ratio","Current Ratio","OCF/NI"}
+                _DAYS_COLS    = {"DSO","Inventory Days"}
+                _PLAIN_COLS   = {"Accrual Ratio"}
+
+                def _fmtv(val, col: str) -> str:
+                    if val is None or (isinstance(val, float) and math.isnan(val)):
+                        return "—"
+                    if col in _EPS_COLS:
+                        return f"${val:.2f}"
+                    if col in _PCT_COLS:
+                        return f"{val*100:.1f}%"
+                    if col in _RATIO_COLS:
+                        return f"{val:.2f}x"
+                    if col in _DAYS_COLS:
+                        return f"{val:.0f}d"
+                    if col in _PLAIN_COLS:
+                        return f"{val:.3f}"
+                    return f"${val:.2f}B"
+
+                def _delta_str(v0, v1, col: str) -> str:
+                    if v0 is None or v1 is None or math.isnan(v0) or math.isnan(v1) or v1 == 0:
+                        return ""
+                    if col in _PCT_COLS:
+                        chg = v0 - v1
+                        arrow = "▲" if chg > 0 else "▼"
+                        return f" {arrow}{abs(chg)*100:.1f}pp"
+                    chg = (v0 - v1) / abs(v1)
+                    arrow = "▲" if chg > 0 else "▼"
+                    return f" {arrow}{abs(chg)*100:.0f}%"
+
+                def _safe_v(df, col, idx=0):
+                    if df.empty or col not in df.columns:
+                        return float("nan")
+                    try:
+                        return float(df[col].iloc[idx])
+                    except (IndexError, TypeError, ValueError):
+                        return float("nan")
+
+                # ── Helper: build a comparison DataFrame for a statement ──────
+                def _build_cmp(stmt_key: str, metric_list: list) -> pd.DataFrame:
+                    da = fd_data_a.get(stmt_key, pd.DataFrame())
+                    db = fd_data_b.get(stmt_key, pd.DataFrame())
+                    qa = fd_data_a.get("display_quarters", [])
+                    qb = fd_data_b.get("display_quarters", [])
+                    label_a = f"{fd_loaded_a} ({qa[0]})" if qa else fd_loaded_a
+                    label_b = f"{fd_loaded_b} ({qb[0]})" if qb else fd_loaded_b
+
+                    rows = []
+                    for m in metric_list:
+                        a_avail = (not da.empty) and (m in da.columns)
+                        b_avail = (not db.empty) and (m in db.columns)
+                        if not a_avail and not b_avail:
+                            continue
+                        v_a0 = _safe_v(da, m, 0); v_a1 = _safe_v(da, m, 1)
+                        v_b0 = _safe_v(db, m, 0); v_b1 = _safe_v(db, m, 1)
+                        rows.append({
+                            "Metric":  m,
+                            label_a:   (_fmtv(v_a0, m) + _delta_str(v_a0, v_a1, m)) if a_avail else "—",
+                            label_b:   (_fmtv(v_b0, m) + _delta_str(v_b0, v_b1, m)) if b_avail else "—",
+                        })
+                    return pd.DataFrame(rows).set_index("Metric") if rows else pd.DataFrame()
+
+                # ── Helper: bar chart for a metric over 4 quarters ───────────
+                def _bar_chart(metric: str, stmt_key: str):
+                    da = fd_data_a.get(stmt_key, pd.DataFrame())
+                    db = fd_data_b.get(stmt_key, pd.DataFrame())
+                    qa = fd_data_a.get("display_quarters", [])
+                    qb = fd_data_b.get("display_quarters", [])
+
+                    rows_a = [
+                        {"Quarter": q, "Value": _safe_v(da, metric, i), "Stock": fd_loaded_a}
+                        for i, q in enumerate(qa)
+                        if not da.empty and metric in da.columns
+                    ]
+                    rows_b = [
+                        {"Quarter": q, "Value": _safe_v(db, metric, i), "Stock": fd_loaded_b}
+                        for i, q in enumerate(qb)
+                        if not db.empty and metric in db.columns
+                    ]
+                    df_plot = pd.DataFrame(rows_a + rows_b).dropna(subset=["Value"])
+                    if df_plot.empty:
+                        return
+
+                    is_pct = metric in _PCT_COLS
+                    if is_pct:
+                        df_plot["Value"] = df_plot["Value"] * 100
+
+                    fig = px.bar(
+                        df_plot, x="Quarter", y="Value", color="Stock",
+                        barmode="group", title=metric,
+                        labels={"Value": "%" if is_pct else "$B"},
+                        color_discrete_sequence=["#636EFA", "#EF553B"],
+                    )
+                    fig.update_layout(height=280, margin=dict(t=35, b=0, l=0, r=0), legend_title_text="")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # ── Statement sub-tabs ───────────────────────────────────────
+                fd_sub_inc, fd_sub_bal, fd_sub_cf, fd_sub_qual = st.tabs([
+                    "Income Statement", "Balance Sheet", "Cash Flow", "Quality Ratios"
+                ])
+
+                with fd_sub_inc:
+                    cmp = _build_cmp("income", INCOME_DISPLAY)
+                    if not cmp.empty:
+                        st.dataframe(cmp, use_container_width=True)
+                    else:
+                        st.info("No income statement data available.")
+                    st.markdown("---")
+                    ch1, ch2, ch3 = st.columns(3)
+                    with ch1: _bar_chart("Revenue",       "income")
+                    with ch2: _bar_chart("Net Income",    "income")
+                    with ch3: _bar_chart("Gross Margin",  "derived")
+
+                with fd_sub_bal:
+                    cmp = _build_cmp("balance", BALANCE_DISPLAY)
+                    if not cmp.empty:
+                        st.dataframe(cmp, use_container_width=True)
+                    else:
+                        st.info("No balance sheet data available.")
+                    st.markdown("---")
+                    ch1, ch2, ch3 = st.columns(3)
+                    with ch1: _bar_chart("Total Debt",         "balance")
+                    with ch2: _bar_chart("Cash & Equivalents", "balance")
+                    with ch3: _bar_chart("D/E Ratio",          "derived")
+
+                with fd_sub_cf:
+                    cmp = _build_cmp("cashflow", CASHFLOW_DISPLAY)
+                    if not cmp.empty:
+                        st.dataframe(cmp, use_container_width=True)
+                    else:
+                        st.info("No cash flow data available.")
+                    st.markdown("---")
+                    ch1, ch2, ch3 = st.columns(3)
+                    with ch1: _bar_chart("Operating CF", "cashflow")
+                    with ch2: _bar_chart("FCF",          "cashflow")
+                    with ch3: _bar_chart("FCF Margin",   "derived")
+
+                with fd_sub_qual:
+                    st.caption(
+                        "Derived quality ratios computed from the quarterly statements. "
+                        "DSO/Inventory Days in days; margins in %; ratios are unitless."
+                    )
+                    cmp = _build_cmp("derived", DERIVED_DISPLAY)
+                    if not cmp.empty:
+                        st.dataframe(cmp, use_container_width=True)
+                    else:
+                        st.info("No derived ratio data available.")
+                    st.markdown("---")
+                    ch1, ch2, ch3 = st.columns(3)
+                    with ch1: _bar_chart("OCF/NI",        "derived")
+                    with ch2: _bar_chart("Accrual Ratio", "derived")
+                    with ch3: _bar_chart("Current Ratio", "derived")
+
+                # ── Alert panel ──────────────────────────────────────────────
+                st.markdown("---")
+                st.subheader("Alerts")
+
+                fd_alerts = detect_fundamental_alerts(fd_data_a, fd_data_b)
+
+                _SEV_ICON_FUND = {"Critical": "🔴", "Warning": "🟡", "Info": "🔵"}
+
+                def _render_alert(a: dict):
+                    icon = _SEV_ICON_FUND.get(a.get("severity", "Info"), "⚪")
+                    msg  = a.get("message", "")
+                    sev  = a.get("severity", "Info")
+                    if sev == "Critical":
+                        st.error(f"{icon} {msg}")
+                    elif sev == "Warning":
+                        st.warning(f"{icon} {msg}")
+                    else:
+                        st.info(f"{icon} {msg}")
+
+                pair_alerts   = [a for a in fd_alerts if a.get("layer") == "pair"]
+                indiv_alerts  = [a for a in fd_alerts if a.get("layer") in ("individual_trend", "quality")]
+
+                al_col1, al_col2 = st.columns(2)
+
+                with al_col1:
+                    st.markdown(f"**Pair Shifts — {fd_loaded_a} vs {fd_loaded_b}**")
+                    if pair_alerts:
+                        for a in pair_alerts:
+                            _render_alert(a)
+                    else:
+                        st.success("No significant pair shifts detected.")
+
+                with al_col2:
+                    st.markdown("**Individual Stock Alerts**")
+                    if indiv_alerts:
+                        for a in indiv_alerts:
+                            _render_alert(a)
+                    else:
+                        st.success("No individual alerts triggered.")
+
+                # ── Alert summary table ──────────────────────────────────────
+                if fd_alerts:
+                    with st.expander("Full alert table", expanded=False):
+                        summary_rows = [{
+                            "Layer":    a.get("layer", ""),
+                            "Stock":    a.get("stock", a.get("metric", "")),
+                            "Flag":     a.get("flag", a.get("metric", a.get("event_type", ""))),
+                            "Severity": a.get("severity", ""),
+                            "Message":  a.get("message", ""),
+                        } for a in fd_alerts]
+                        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+                # ── AI Commentary ─────────────────────────────────────────────
+                st.markdown("---")
+                st.subheader("AI Fundamental Briefing")
+                st.caption(
+                    "Claude analyses the metrics and triggered alerts above and writes a ~200-word "
+                    "plain-English briefing covering relative strength, trends, and red flags."
+                )
+
+                if st.button("Generate AI Commentary", type="primary", key="fd_commentary_btn"):
+                    with st.spinner("Asking Claude to analyse the fundamentals…"):
+                        try:
+                            text = generate_fundamental_commentary(fd_data_a, fd_data_b, fd_alerts)
+                            st.session_state["fd_commentary"] = text
+                        except Exception as exc:
+                            st.error(f"Commentary generation failed: {exc}")
+
+                if "fd_commentary" in st.session_state:
+                    st.markdown(st.session_state["fd_commentary"])
+
 
 # ─── Tab 8: Manage Tickers ───────────────────────────────────────────────────
 with tab_manage:

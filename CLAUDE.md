@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations (6m/12m/24m), stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, runs cointegration tests on 5-year and 2-year data (bidirectional EG + quarterly 1-year p-values), and executes pairs-trading signals with a quarterly-fixed hedge ratio.
+Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations (6m/12m/24m), stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, runs cointegration tests on 5-year and 2-year data (bidirectional EG + quarterly 1-year p-values), executes pairs-trading signals with a quarterly-fixed hedge ratio, and compares quarterly fundamentals for any two stocks with a 3-layer alert engine and AI-written fundamental briefing grounded exclusively in yfinance data.
 
 ## Environment Setup
 
@@ -62,8 +62,17 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 **API:**
 - `api/main.py` — FastAPI backend with 11+ endpoints including `/prices/latest-date`; `app/db.py` is the query layer. Period parameter accepts `6m`, `12m`, `24m`, `60m`.
 
+**Fundamental Comparison Agent (`fundamental comparison agent/`):**
+- `fundamental_data.py` — fetches up to 8 quarters of quarterly income statement, balance sheet, and cash flow for any ticker via yfinance; normalizes to $B; computes 11 derived quality ratios (DSO, Inventory Days, Gross/Op/Net Margins, D/E, Current Ratio, OCF/NI, Accrual Ratio, FCF Margin, R&D % Revenue); entry point `fetch_fundamentals(symbol)` returns a dict with DataFrames + metadata
+- `fundamental_alerts.py` — 3-layer alert engine; entry point `detect_fundamental_alerts(data_a, data_b)` returns alerts sorted Critical → Warning → Info:
+  - **Layer 1 (Pair relative-shift)**: tracks how the A-vs-B differential changed QoQ (reversal / A-gaining / A-losing) across 9 metrics; reversals on Revenue/NI/FCF escalated to Critical
+  - **Layer 2a (Individual trend)**: 11 QoQ/YoY checks per stock (revenue drop, NI swing, margin contraction, FCF decline, cash drop, debt surge, EPS decline)
+  - **Layer 2b (Earnings quality)**: 17 pattern and ratio checks per stock covering all 7 named concern patterns (e.g. "Aggressive revenue recognition", "Financial engineering", "Dependence on external funding") — alert messages include the "Potential Concern" label as a second clause
+- `fundamental_commentary.py` — on-demand Claude agent; **anti-hallucination hardcoded** via system prompt: Claude may only use figures in the supplied KEY METRICS and ALERTS blocks; no external data, news, or estimates permitted; entry point `generate_fundamental_commentary(data_a, data_b, alerts)` returns a ~200-word briefing string (no DB writes)
+- `PLAN.md` — full design spec: metrics tracked, alert rules + thresholds, pattern → concern table, QoQ convention, anti-hallucination design, architecture decisions
+
 **Dashboard:**
-- `app/streamlit_app.py` — 6-tab Streamlit dashboard: Correlation (sub-tabs: Heatmap / Rolling / Network Graph), Cointegration, Trading Signals (+ hypothetical 5-year PnL), Backtest (4yr/1yr), Regime Alerts, Manage Tickers
+- `app/streamlit_app.py` — 7-tab Streamlit dashboard: Correlation (sub-tabs: Heatmap / Rolling / Network Graph), Cointegration, Trading Signals (+ hypothetical 5-year PnL), Backtest (4yr/1yr), Regime Alerts, **Fundamental Comparison**, Manage Tickers
 - **Auto-ETL on startup**: on first load of each browser session, checks `/prices/latest-date`; if data is stale on a weekday, runs ETL for all DB tickers automatically before rendering tabs
 - `app/api_client.py` — HTTP client so Streamlit never touches the DB directly
 
@@ -108,7 +117,11 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 - **State-based + crossing alerts** — each rule reports both current state (`triggered`) and whether it changed within the last 5 trading days (`recently_crossed`). This distinguishes a new actionable signal from a condition that has been true for weeks.
 - **`correlation_history` retained in schema** — table is kept for backwards compatibility but ETL no longer writes to it; the regime agent does not use correlation snapshots.
 - **Quarterly-fixed β, not daily rolling** — `trading_signals.py` and `backtest.py` estimate β from a trailing 1-year OLS once per calendar quarter (at the quarter boundary), then hold it fixed for the entire quarter. This eliminates daily β noise and negative-beta windows that could invert the hedge. `BETA_WINDOW = 252` trading days; z-score window is separately configurable (60–120 days).
-- **Default pair is ARM/TSM** — set across all tabs (Rolling Correlation, Cointegration, Trading Signals, Backtest) because ARM/TSM is the primary analytical pair used throughout the project.
+- **Default pair is ARM/TSM** — set across all tabs (Rolling Correlation, Cointegration, Trading Signals, Backtest, Fundamental Comparison) because ARM/TSM is the primary analytical pair used throughout the project.
+- **Fundamental comparison is in-memory only** — no DB writes; `fetch_fundamentals()` is cached 6 hours in Streamlit (`@st.cache_data(ttl=21600)`). Quarterly fundamentals don't change intraday so a 6-hour TTL is sufficient without hammering yfinance.
+- **Fundamental commentary anti-hallucination** — `generate_fundamental_commentary()` passes a system prompt that explicitly prohibits Claude from using any information outside the supplied KEY METRICS and ALERTS blocks. This prevents the model from citing news, earnings calls, analyst estimates, or any external context not derived from the yfinance data in the prompt.
+- **QoQ convention in Fundamental Comparison** — all DataFrames are sorted most-recent first (`iloc[0]` = current quarter, `iloc[1]` = prior quarter). Every QoQ alert and every delta arrow in the comparison tables compares those two positions. A "Q1 2026" row always shows the change vs Q4 2025.
+- **Fundamental comparison fetches up to 8 quarters** — display tables show 4; the alert engine uses all available quarters for pattern checks (e.g. "cash declining for 3+ consecutive quarters") and YoY comparisons (`iloc[4]` = same quarter one year ago).
 
 ## Git Workflow
 
@@ -132,7 +145,7 @@ Files to keep in sync:
 - **Hardcoded tickers**: `TICKERS` list is duplicated in both extract.py and transform.py — keep them in sync.
 - **Correlation windows**: "6m" ≈ 126 trading days, "12m" ≈ 252, "24m" ≈ 504, "60m" ≈ 1260. 1m was removed. Sort by date before computing daily returns.
 - **No test suite** — use each module's `if __name__ == "__main__"` block to smoke-test during development.
-- **Cointegration / Trading Signals / Backtest / Regime Detection modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, `Backtest/`, and `Regime detection agent/` are added to `sys.path` at the top of `streamlit_app.py` and `api/main.py` — if you move them, update those `sys.path.insert` calls.
+- **Cointegration / Trading Signals / Backtest / Regime Detection / Fundamental Comparison modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, `Backtest/`, `Regime detection agent/`, and `fundamental comparison agent/` are all added to `sys.path` at the top of `streamlit_app.py` — if you move any of them, update the corresponding `sys.path.insert` call.
 - **Trading Signals uses `st.session_state`**: results from the Trading Signals tab are stored under `st.session_state["ts_df"]` so the Daily PnL tab can read them without recomputing. If the user navigates to Daily PnL before running signals, they see a prompt to compute first.
 - **Quarterly β requires 252-day warmup**: `compute_rolling_signals` only assigns a β after `BETA_WINDOW = 252` trading days of history exist. Rows before that are NaN for beta/spread/z-score. The backtest's 4-year training window ensures this warmup is satisfied well before the test period begins.
 - **Decimal types from DB**: `psycopg2` returns `decimal.Decimal` for numeric columns — always cast to `float` before passing to numpy/statsmodels.
@@ -141,3 +154,6 @@ Files to keep in sync:
 - **NDX-100 component list is hardcoded** in `data_collector.py` — update it when the index rebalances quarterly. Delisted tickers (e.g. WBA, ANSS) cause yfinance warnings but do not break the breadth computation; they are simply excluded from the count.
 - **Streamlit does not auto-reload modules outside `app/`** — edits to `Cointegration test/cointegration.py`, `Trading signals/trading_signals.py`, etc. require a Streamlit server restart (`pkill -f "streamlit run"`) to take effect; the file watcher only watches `app/`.
 - **Rolling correlation always uses `date.today()` as end date** — `rc_end = date.today()` and `rc_start = rc_end - timedelta(days=1900)` are hardcoded in the Rolling sub-tab, independent of the sidebar date range picker.
+- **Fundamental Comparison uses `st.session_state` for loaded data** — results from `fetch_fundamentals()` are stored under `st.session_state["fd_data_a"]` / `"fd_data_b"` after the Load button is clicked. Switching sub-tabs (Income / Balance / Cash Flow / Quality) does not re-fetch. If the user changes the stock pickers without clicking Load, the displayed data is stale — the tab shows a notice.
+- **yfinance quarterly statement row names vary by ticker** — `fundamental_data.py` maps yfinance index names (e.g. `"Total Revenue"`) to display names via `INCOME_MAP`, `BALANCE_MAP`, `CASHFLOW_MAP`. If a row is absent for a given ticker (e.g. ARM has no EBITDA), the column is silently NaN — no crash. Check the mapping dicts if a metric unexpectedly shows "—" for all quarters.
+- **TSM reports in USD via yfinance ADR** — despite being a TWD-reporting company, the NYSE-listed ADR (TSM) is returned by yfinance in USD. No currency conversion warning is shown for TSM. A banner fires only when `ticker.info["currency"]` returns a non-USD value.

@@ -385,7 +385,7 @@
     <div class="header">
       <div class="header-left">
         <h1>Stock Correlation Project</h1>
-        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations, monitors macro regime indicators (10Y yield, TIPS, Nasdaq breadth, VIX, SMH/QQQ) with a 10-rule alert engine, runs bidirectional cointegration tests, generates rolling pairs-trading signals, backtests on a 4yr/1yr train-test split, persists results in PostgreSQL, and surfaces everything via a 6-tab Streamlit dashboard with on-demand AI regime commentary via Claude.</p>
+        <p>End-to-end data pipeline that fetches 5 years of daily OHLCV prices for tech stocks, computes pairwise Pearson correlations, monitors macro regime indicators (10Y yield, TIPS, Nasdaq breadth, VIX, SMH/QQQ) with a 10-rule alert engine, runs bidirectional cointegration tests, generates rolling pairs-trading signals, backtests on a 4yr/1yr train-test split, compares quarterly fundamentals with a 3-layer earnings-quality alert engine, persists results in PostgreSQL, and surfaces everything via a 7-tab Streamlit dashboard with on-demand AI commentary via Claude.</p>
         <div class="purpose-row">
           <div class="purpose">
             <div class="purpose-label">Purpose of the Analysis</div>
@@ -394,6 +394,7 @@
               <li>Test pairs for cointegration (ADF + Engle-Granger) to confirm a stable long-run spread exists</li>
               <li>Generate actionable LONG/SHORT/EXIT signals via rolling z-score and daily PnL tracking</li>
               <li>Identify potential regime changes versus temporary market effects driving co-movement</li>
+              <li>Compare quarterly fundamentals across pairs — screen for earnings quality red flags and AI-generated briefings grounded exclusively in yfinance data</li>
             </ul>
           </div>
           <div class="pair-chart">
@@ -510,7 +511,7 @@
             <div class="step-icon viz">&#9632;</div>
             <div class="step-text">
               <strong>Visualize</strong>
-              <span>FastAPI serves results; Streamlit renders 6-tab dashboard: Correlation (heatmap / rolling / network), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts (macro indicators + AI commentary), Manage Tickers</span>
+              <span>FastAPI serves results; Streamlit renders 7-tab dashboard: Correlation (heatmap / rolling / network), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts (macro indicators + AI commentary), Fundamental Comparison (quarterly statements + 3-layer alerts + AI briefing), Manage Tickers</span>
             </div>
           </div>
 
@@ -623,7 +624,7 @@
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
-            <span>Streamlit — 6-tab dashboard: Correlation (3 sub-tabs), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts, Manage Tickers</span>
+            <span>Streamlit — 7-tab dashboard: Correlation (3 sub-tabs), Cointegration, Trading Signals + 5yr PnL, Backtest (4yr/1yr), Regime Alerts, Fundamental Comparison, Manage Tickers</span>
           </div>
           <div class="status-item">
             <span class="badge done">DONE</span>
@@ -636,6 +637,18 @@
           <div class="status-item">
             <span class="badge done">DONE</span>
             <span>Backtest — 4yr warm-up / 1yr test; Sharpe, Calmar, VaR, CVaR, cost sensitivity, stability charts</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>fundamental_data.py — up to 8 quarters of yfinance quarterly statements; 11 derived quality ratios (DSO, Accrual Ratio, OCF/NI, margins, D/E, Current Ratio…)</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>fundamental_alerts.py — 3-layer engine: pair relative-shift (9 metrics), individual trend (11 checks), earnings quality (17 checks, 7 named concern patterns)</span>
+          </div>
+          <div class="status-item">
+            <span class="badge done">DONE</span>
+            <span>fundamental_commentary.py — on-demand ~200-word AI briefing; anti-hallucination system prompt hardcoded — no external data permitted</span>
           </div>
         </div>
 
@@ -674,6 +687,9 @@
         <span class="design-pill">Bidirectional Engle-Granger</span>
         <span class="design-pill">Rolling z-score signals</span>
         <span class="design-pill">4yr/1yr train-test backtest</span>
+        <span class="design-pill">Fundamental comparison agent</span>
+        <span class="design-pill">Earnings quality screening</span>
+        <span class="design-pill">Anti-hallucination grounding</span>
       </div>
     </div>
 
