@@ -1,7 +1,7 @@
 def adf_conclusion(is_stationary: bool) -> str:
     if is_stationary:
-        return "Series is stationary — not ideal for cointegration testing (prices usually aren't)."
-    return "Series is non-stationary — expected for stock prices, required for cointegration."
+        return "Series is stationary — not ideal for cointegration testing (log prices usually aren't)."
+    return "Series is non-stationary — expected for log prices, required for cointegration."
 
 
 def eg_conclusion(is_cointegrated: bool) -> str:
@@ -12,5 +12,5 @@ def eg_conclusion(is_cointegrated: bool) -> str:
 
 def pair_conclusion(pair_passes: bool) -> str:
     if pair_passes:
-        return "PASS — pair meets all cointegration criteria. Suitable for pairs trading."
-    return "FAIL — pair does not meet all criteria. Not suitable for pairs trading."
+        return "PASS — 5yr and 2yr EG tests both pass. Pair meets cointegration criteria."
+    return "FAIL — 5yr or 2yr EG test failed. Pair does not meet cointegration criteria."

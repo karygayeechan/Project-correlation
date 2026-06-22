@@ -1,84 +1,121 @@
 Three data periods are used. Each serves a distinct purpose. All windows end on today's date.
+All computations use log(price) throughout.
+
+Each window estimates its own α and β independently via OLS — no cross-window parameter sharing.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 1 — ADF TEST  |  Data period: PAST 5 YEARS
+STEP 1 — I(1) PREREQUISITE CHECK  |  Data period: PAST 5 YEARS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Stationary means: constant mean; constant variance; doesn't wander indefinitely.
+For each series, run two ADF tests on log(price):
+  (a) Level test:      adfuller(log_price, autolag='AIC')
+  (b) Difference test: adfuller(log_price.diff().dropna(), autolag='AIC')   [= log returns]
 
-Run ADF twice — once for stock A and once for stock B — on the past 5 years of price data.
-Interpretation: p < 0.05 = stationary; p > 0.05 = non-stationary.
-If non-stationary: give it a check mark ✓ (this is required for cointegration).
-If stationary: give it a question mark ? (unexpected for raw prices).
+A series is I(1) if BOTH conditions hold:
+  • Level p > 0.05 — log price is non-stationary ✓
+  • Diff  p < 0.05 — log returns are stationary  ✓
 
-Display as a compact banner, NOT a full metrics table:
-  - Both non-stationary (normal): show a single green success banner summarising both p-values.
-  - Any series stationary (unusual): show an amber warning alert naming the stationary ticker and
-    its p-value. Then show an info message for the non-stationary one. Alert the user that
-    cointegration results may not be reliable.
+Display as a compact banner:
+  • Both I(1) → green success banner, show level and diff p-values for each ticker.
+  • Level non-stationary but diff also non-stationary (may be I(2)) → amber warning; still proceed.
+  • Level stationary (unusual) → amber warning; still proceed.
 
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 2 — ENGLE-GRANGER SPREAD CHARTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Run Engle-Granger in BOTH directions, for TWO separate data periods: 5 years and 2 years.
-This produces four spread charts in total.
-
-For each direction and each data period:
-   1) Regress A on B (or B on A): compute α (intercept) and β (hedge ratio)
-   2) Compute residuals: ϵ = A − (α + β·B)
-   3) Run ADF on residuals
-   Interpretation: p < 0.05 = cointegrated (spread is stationary); p > 0.05 = not cointegrated
-
-Primary direction per window = the direction (A→B or B→A) with the lower p-value.
-The primary direction is determined independently for each data period — it may differ between
-the 5-year and 2-year windows.
-
-Chart order on dashboard:
-   [Past 5 Years heading]
-   Chart 1: ★ Primary direction  —  Spread (5yr): TICKER_A→TICKER_B  [start → end]
-   Chart 2:   Reverse direction  —  Spread (5yr): TICKER_B→TICKER_A  [start → end]
-   --- separator ---
-   [Past 2 Years heading]
-   Chart 3: ★ Primary direction  —  Spread (2yr): TICKER_A→TICKER_B  [start → end]
-   Chart 4:   Reverse direction  —  Spread (2yr): TICKER_B→TICKER_A  [start → end]
-
-Each chart shows:
-   - Spread (residuals) over time with ±1σ bands and mean line
-   - α (intercept), β (hedge ratio)
-   - ADF test statistic, p-value, critical values (1% / 5% / 10%)
-   - Verdict: Cointegrated ✓ or Not cointegrated ✗
-
-The data period must be stated explicitly in each chart title (5yr or 2yr) along with the
-exact date range (e.g. "Jun 2021 → Jun 2026").
+autolag='AIC' is used for all adfuller() calls throughout the module.
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 3 — QUARTERLY P-VALUES  |  Data period: PAST 1 YEAR
+STEP 2a — 5-YEAR EG TEST  (long-run reference)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-The past 1 year of daily price data is divided into 4 equal quarterly windows:
-  Q1 = oldest quarter, Q2, Q3, Q4 = most recent quarter (~63 trading days each).
+Regression on 5-year log prices:   log(Y) = α₅ + β₅ · log(X) + ε
 
-For each quarter, run Engle-Granger in BOTH directions and display BOTH p-values explicitly,
-labelled with which ticker is regressed on which:
+Run OLS in BOTH directions (A=Y, B=X) and (B=Y, A=X) on the 5-year data.
+For each direction: estimate α₅, β₅ → compute residuals → ADF(residuals, autolag='AIC').
+Cointegrated = p < 0.05.
 
-   ★ TICKER_A regressed on TICKER_B  →  p-value
-     TICKER_B regressed on TICKER_A  →  p-value
+Primary direction = lower 5yr p-value.
 
-★ marks the primary direction (the lower p-value). The primary drives the pass/fail verdict.
-Pass condition per quarter: primary p-value < 0.05.
+Show two spread charts (primary ★ and reverse) each containing:
+  - Log-price spread (residuals) over time with ±1σ bands and mean line
+  - α₅, β₅ metrics
+  - ADF test statistic, p-value, critical values (1%/5%/10%)
+  - Verdict: Cointegrated ✓ or Not cointegrated ✗
+  - Chart title: Spread (5yr): TICKER_Y→TICKER_X  [Mon YYYY → Mon YYYY]
 
-Output: 4 quarter cards side by side (Q1 = oldest, Q4 = most recent):
-   Q1: date range | both direction p-values (labelled) | Cointegrated ✓ or Not cointegrated ✗
-   Q2: same structure
-   Q3: same structure
-   Q4: same structure
+Label each direction: "TICKER_Y (Y) regressed on TICKER_X (X)"
 
-Below the cards:
-   "X/4 quarters passed" summary
-   Final PASS banner (all 4 pass) or FAIL banner (any quarter fails)
 
-The pair passes the full cointegration test only if ALL FOUR quarters pass (4/4).
-Report how many quarters passed even when the overall verdict is FAIL.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2b — 2-YEAR EG TEST  (recent confirmation + β comparison)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Regression on 2-year log prices:   log(Y) = α₂ + β₂ · log(X) + ε
+
+Fresh OLS on 2-year data — α₂ and β₂ are re-estimated independently (NOT fixed from 5yr).
+Run in BOTH directions; show both p-values. Primary direction = lower 2yr p-value (may differ
+from the 5yr primary direction).
+
+Show two spread charts (same format as 5yr), then a β Comparison block:
+
+  β Comparison: 5yr vs 2yr OLS
+  ┌────────────────────┬──────────┬──────────┬────────┐
+  │ Direction          │ β (5yr)  │ β (2yr)  │ Change │
+  ├────────────────────┼──────────┼──────────┼────────┤
+  │ A (Y) → B (X)     │  β₅_AB   │  β₂_AB   │  Δ     │
+  │ B (Y) → A (X)     │  β₅_BA   │  β₂_BA   │  Δ     │
+  └────────────────────┴──────────┴──────────┴────────┘
+
+A large or persistent β shift suggests structural drift in the relationship.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3 — QUARTERLY P-VALUES  |  Data: PAST 1 YEAR  (display only)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These results are FOR DISPLAY ONLY and do NOT affect the overall pass/fail verdict.
+
+Fresh OLS is computed per quarter (~63 trading days each, Q1 = oldest, Q4 = most recent).
+Both directions are shown per quarter, each with its own independently estimated α and β.
+
+Each quarter card shows:
+  - Date range
+  - ★ Lower p-value direction: "TICKER_Y (Y) on TICKER_X (X)  β=X.XXX" + p-value
+  -   Other direction: "TICKER_Y (Y) on TICKER_X (X)  β=X.XXX" + p-value
+  - Cointegrated ✓ or Not cointegrated ✗ (based on ★ direction p < 0.05)
+
+Below cards: "X/4 quarters showed cointegration (reference only)."
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 4 — OVERALL VERDICT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PASS iff:
+  • 5yr primary EG p-value < 0.05   AND
+  • 2yr primary EG p-value < 0.05
+
+Quarterly (1yr) results do NOT determine the verdict.
+
+Display two-column: 5yr result (✓/✗ + p) | 2yr result (✓/✗ + p)
+Final PASS/FAIL banner. Quarterly reference count as footnote.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STABILITY DIAGNOSTICS — Rolling β Chart
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Computed separately from the EG tests. Uses 5-year history in the primary direction.
+
+Rolling 252-day OLS β for log(Y) = α + β · log(X):
+  At each date t: regress log(Y_{t-251:t}) on log(X_{t-251:t}) → record β_t.
+
+Chart:
+  - Rolling β line over 5-year history
+  - Fixed 5yr β (from the 5yr EG OLS) as a red dashed reference line
+  - ±1σ bands of the rolling β distribution (gray dotted)
+
+Summary metrics below chart:
+  Fixed 5yr β | Rolling β Mean | Rolling β Std | Rolling β Range (min → max)
+
+Purpose: reveal hedge ratio volatility, structural breaks, regime shifts over time.
+Displayed as "Stability Diagnostics" section in the Cointegration tab, below the Final Verdict.

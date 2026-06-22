@@ -1,127 +1,143 @@
 # Cointegration Test — Implementation Plan
 
 ## Goal
-Add a "Cointegration Test" tab to the Streamlit dashboard that runs cointegration tests on any chosen pair of stocks. Three data windows are used, each serving a different purpose:
+Cointegration test tab in Streamlit. Three data windows, each with its own independent OLS.
 
-| Window | Data period | Used for |
-|---|---|---|
-| **5-year** | Past 5 years (365 × 5 calendar days) | ADF prerequisite banner + EG spread charts |
-| **2-year** | Past 2 years (365 × 2 calendar days) | Additional EG spread charts |
-| **1-year** | Past 1 year (365 calendar days) | Quarterly p-value table (4 windows × ~63 trading days) |
+| Window | Data period | OLS | Used for |
+|---|---|---|---|
+| **5-year** | 365 × 5 cal days | Fresh on 5yr data | I(1) check; EG test; rolling β reference; verdict |
+| **2-year** | 365 × 2 cal days | Fresh on 2yr data | EG confirmation; β comparison vs 5yr; verdict |
+| **1-year** | 365 cal days | Fresh per ~63-day quarter | Quarterly display only (not verdict) |
 
-All data is fetched live from the DB (`stock_prices` table) via psycopg2 with `end = date.today()` — results always reflect the most recent available prices.
+All data from DB (`stock_prices`), `end = date.today()`. All computations use **log(price)**.
 
 ---
 
 ## Module: `Cointegration test/cointegration.py`
 
-Pure computation module — no Streamlit imports.
-
-### `fetch_prices(sym_a, sym_b, days=365) -> (pd.Series, pd.Series)`
-- Fetches `adj_close` from DB for both symbols over the past `days` calendar days ending today
-- Returns two aligned price Series indexed by date
-- Called three times in `run_all`: with `days=365*5`, `days=365*2`, and `days=365`
+### `fetch_prices(sym_a, sym_b, days) -> (Series, Series)`
+Fetches adj_close from DB; returns aligned raw price Series. Log transform applied downstream.
 
 ### `run_adf(series, label) -> dict`
-- Runs `adfuller()` on the series
-- Returns: `{ label, stat, p_value, critical_values, is_stationary (p<0.05), verdict }`
-- p < 0.05 → stationary → `verdict = "?"` (unexpected for raw prices)
-- p > 0.05 → non-stationary → `verdict = "✓"` (expected; required for cointegration)
-- **Data used: 5-year series**
+Tests log(price) for I(1). `autolag='AIC'` used for all adfuller calls.
+- **Level**: `adfuller(log_price, autolag='AIC')`
+- **Diff**: `adfuller(log_price.diff().dropna(), autolag='AIC')`
+- `is_i1 = (level p > 0.05) AND (diff p < 0.05)`
+- Returns: `label, stat, p_value, critical_values, is_stationary, verdict, diff_p_value, is_diff_stationary, is_i1`
 
 ### `run_engle_granger(series_a, series_b) -> dict`
-- OLS: regress A on B (with intercept) → α (intercept), β (hedge ratio)
-- Residuals = A − (α + β·B)
-- ADF on residuals → `stat`, `p_value`, `critical_values`, `is_cointegrated (p<0.05)`, `verdict`
-- Called 12 times per `run_all`: twice on 5yr data, twice on 2yr data, twice per quarter × 4 quarters = 8
+OLS on log prices + ADF on residuals. Called with whatever window's data is passed in —
+the α and β it returns are specific to that window.
+- `log(A) = α + β · log(B) + ε` — OLS with intercept
+- `adfuller(residuals, autolag='AIC')`
+- Returns: `alpha, beta, residuals, stat, p_value, critical_values, is_cointegrated, verdict`
+
+### `compute_rolling_beta(series_y, series_x, window=252) -> pd.Series`
+Rolling OLS β for `log(Y) = α + β·log(X)`. Vectorized closed-form formula.
+Computed separately from EG tests — for stability diagnostics only.
 
 ### `run_all(sym_a, sym_b) -> dict`
-Orchestrates all three windows and returns a single result dict:
 
-**5-year fetch** (`days=365*5`):
-- `adf_a`, `adf_b` — ADF on each series
-- `eg` / `eg_direction` — primary EG direction (lower p-value of A→B vs B→A)
-- `eg_reverse` / `eg_reverse_direction` — reverse EG direction
-- Spread residuals span ~1,255 trading days (less for tickers with shorter history, e.g. ARM IPO Sep 2023)
+**5yr phase:**
+1. `run_adf` on each log-price series
+2. `run_engle_granger` in both directions on 5yr data → `eg_ab_5yr`, `eg_ba_5yr`
+3. Primary = lower 5yr p-value → `eg`, `eg_direction`, `eg_reverse`, `eg_reverse_direction`
+4. `eg_5yr_passes = primary["is_cointegrated"]`
 
-**2-year fetch** (`days=365*2`):
-- `eg_2yr` / `eg_direction_2yr` — primary EG direction on 2yr data
-- `eg_reverse_2yr` / `eg_reverse_direction_2yr` — reverse EG direction on 2yr data
-- Spread residuals span ~502 trading days
+**2yr phase:**
+5. `run_engle_granger` in both directions on 2yr data → `eg_ab_2yr`, `eg_ba_2yr`
+   (fresh OLS — α₂, β₂ are independent of the 5yr values)
+6. Primary = lower 2yr p-value → `eg_2yr`, `eg_direction_2yr`, etc.
+7. `eg_2yr_passes = primary_2yr["is_cointegrated"]`
 
-**1-year fetch** (`days=365`):
-- Split into **4 equal quarterly windows** (Q1 = oldest, Q4 = most recent, ~63 trading days each)
-- Each quarter: `eg_ab` (A→B), `eg_ba` (B→A), `primary_p` (lower of the two), `primary_direction`, `passes (p < 0.05)`
-- `quarters_passing` — integer count (0–4)
-- `pair_passes` — True only when all 4 quarters pass
+**Verdict:**
+8. `pair_passes = eg_5yr_passes and eg_2yr_passes`
 
----
+**Quarterly phase (display only):**
+9. Fetch 1yr; split into 4 equal windows (~63 obs)
+10. Each quarter: `run_engle_granger` in both directions (fresh OLS for that quarter)
+11. Quarter dict: `{ label, start_date, end_date, n_obs, eg_ab, eg_ba, primary_p, primary_direction, passes }`
+12. `quarters_passing` = count of `passes == True`
 
-## Module: `Cointegration test/conclusions.py`
+**Stability diagnostics:**
+13. `compute_rolling_beta(prim_y_5yr, prim_x_5yr)` → `rolling_beta`
 
-### `adf_conclusion(is_stationary) -> str`
-- True  → "Series is stationary — not ideal for cointegration testing."
-- False → "Series is non-stationary — expected for stock prices, required for cointegration."
-
-### `eg_conclusion(is_cointegrated) -> str`
-- True  → "Residuals are stationary: the pair is cointegrated."
-- False → "Residuals are non-stationary: the pair is NOT cointegrated."
-
-### `pair_conclusion(pair_passes) -> str`
-- True  → "PASS — pair meets all cointegration criteria."
-- False → "FAIL — pair does not meet all criteria."
+**Return dict keys:**
+- `sym_a, sym_b, adf_a, adf_b`
+- `eg, eg_direction, eg_reverse, eg_reverse_direction, eg_5yr_passes`
+- `eg_ab_5yr, eg_ba_5yr` — raw A→B and B→A 5yr results (for β comparison)
+- `eg_ab_2yr, eg_ba_2yr` — raw A→B and B→A 2yr results (for β comparison)
+- `eg_2yr, eg_direction_2yr, eg_reverse_2yr, eg_reverse_direction_2yr, eg_2yr_passes`
+- `pair_passes`
+- `quarters` (list), `quarters_passing`
+- `rolling_beta, rolling_beta_direction, rolling_beta_window`
 
 ---
 
 ## Dashboard layout (`app/streamlit_app.py`)
 
-### Controls
-- Stock A / Stock B dropdowns (all DB tickers; default ARM / TSM)
-- "Run Cointegration Test" button (no auto-run on load)
+### Section 1 — I(1) prerequisite banner (5yr log prices)
+Compact status using `adf_a["is_i1"]` and `adf_b["is_i1"]`. Warnings if not I(1).
 
-### Section 1 — ADF prerequisite banner (5-year data)
-- **Not** shown as a full metrics table — displayed as a compact status banner
-- Both non-stationary (normal case): green success — `"✓ TICKER_A (p=X) and TICKER_B (p=Y) are both non-stationary over the past 5 years — proceeding to Engle-Granger"`
-- Any series stationary (unusual): amber warning alert naming the ticker + p-value; then info banner for the non-stationary one; then `"Proceeding to Engle-Granger test."`
+### Section 2 — EG spread charts
 
-### Section 2 — Engle-Granger spread charts
+**`_render_eg_pair(eg_res, eg_dir, is_primary, period_label, line_color)`**
+- Header: `★ Primary direction — DEP (Y) regressed on INDEP (X)`
+- 2 metrics: α (intercept), β (elasticity)
+- Spread chart: log-price residuals, ±1σ, mean; y-axis = "Log-Price Spread"
+- 5 metrics: test stat, p-value, crit 1%/5%/10%
+- Verdict banner
 
-**Past 5 Years** (heading)
-- **★ Primary direction** — `TICKER_A regressed on TICKER_B` (or B on A if that is the lower p-value)
-  - Chart title: `Spread (5yr): TICKER_A→TICKER_B  [Mon YYYY → Mon YYYY]`
-  - Spread chart with ±1σ bands and mean line
-  - Metrics: α, β, ADF stat, p-value, critical values (1%/5%/10%), cointegrated ✓/✗
-- **Reverse direction** — opposite regression
-  - Chart title: `Spread (5yr): TICKER_B→TICKER_A  [Mon YYYY → Mon YYYY]`
-  - Same metric layout
+**Past 5 Years** — heading notes that α and β come from 5yr OLS:
+- Primary direction (blue `#2196F3`)
+- Reverse direction (purple `#9C27B0`)
 
-`---` separator
+**Past 2 Years — Fresh OLS on 2yr data** heading:
+- Primary direction (teal `#00897B`)
+- Reverse direction (orange `#F57C00`)
 
-**Past 2 Years** (heading)
-- **★ Primary direction** (2-year, independently determined)
-  - Chart title: `Spread (2yr): TICKER_A→TICKER_B  [Mon YYYY → Mon YYYY]`
-- **Reverse direction** (2-year)
-  - Chart title: `Spread (2yr): TICKER_B→TICKER_A  [Mon YYYY → Mon YYYY]`
+**β Comparison block** (after 2yr charts, 4 metric columns):
+- `β  A(Y)→B(X)  5yr` | `β  A(Y)→B(X)  2yr` (delta vs 5yr) | same for B→A
+- Delta = 2yr β − 5yr β; large shift suggests structural drift
 
-Primary direction is determined independently per window — which direction has the lower p-value can differ between 5yr and 2yr.
+### Section 3 — Quarterly display (reference only, fresh per-quarter OLS)
+Each quarter card:
+- ★ on lower p-value direction
+- Both directions show `TICKER (Y) on TICKER (X)  β=X.XXX` + p-value
+- Pass/fail badge based on ★ direction p < 0.05
 
-### Section 3 — Quarterly p-values (1-year data)
-- Caption states: "★ marks the primary direction (lower p-value), which determines pass/fail. Pass condition: p < 0.05."
-- Four side-by-side cards (Q1 = oldest, Q4 = most recent):
-  - Date range (e.g. `Jun 17 2025 → Sep 16 2025`)
-  - Row 1: `★ TICKER_A regressed on TICKER_B` + p-value metric (★ on whichever is primary)
-  - Row 2: `TICKER_B regressed on TICKER_A` + p-value metric
-  - Pass/fail badge: `Cointegrated ✓` (green) or `Not cointegrated ✗` (red)
-- Below cards: `X/4 quarters passed` summary + final PASS/FAIL banner
+Caption notes: fresh per-quarter OLS; results are reference only.
+
+### Section 4 — Final Verdict
+- Two-column: 5yr result | 2yr result
+- PASS/FAIL banner
+- Quarterly count as footnote
+
+### Section 5 — Stability Diagnostics
+Rolling β chart on 5yr history (primary direction):
+- Line: rolling β | Red dashed: fixed 5yr β | Gray dotted: ±1σ of rolling β
+- 4 summary metrics: Fixed 5yr β | Rolling mean | Rolling std | Range
 
 ---
 
-## File structure
-```
-Cointegration test/
-  Cointegration test instruction   # original spec (updated to reflect data periods)
-  PLAN.md                          # this file
-  cointegration.py                 # computation logic
-  conclusions.py                   # verdict text
-```
-`app/streamlit_app.py`             # modified to add the tab and all sections above
+## Key design decisions
+
+- **Independent OLS per window**: Each window (5yr, 2yr, each quarter) estimates its own
+  α and β from its own data. This lets the β comparison (5yr vs 2yr) directly answer
+  "has the hedge ratio drifted in the recent 2 years vs the 5-year baseline?"
+
+- **2yr as confirmation with independent β**: If the 2yr OLS independently finds
+  cointegration, it means the shorter-horizon data supports the same relationship — stronger
+  evidence than forcing 5yr params onto 2yr data.
+
+- **β comparison on both directions**: Showing both A→B and B→A β changes gives a
+  complete picture of how the relationship has evolved regardless of which direction is primary.
+
+- **Quarterly shows β per card**: Each quarter's fresh β is shown next to the p-value
+  (e.g. `β=0.540`), making the short-term β volatility visible without needing a separate chart.
+
+- **Rolling β uses 5yr primary direction**: The stability diagnostics chart uses the 5yr
+  primary direction consistently so the rolling β line is directly comparable to the fixed 5yr β.
+
+- **log(price) + AIC throughout**: All adfuller calls use autolag='AIC'. Regression is
+  log-log, giving β an elasticity interpretation standard in financial econometrics.

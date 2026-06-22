@@ -3,7 +3,7 @@ import pandas as pd
 
 def reshape(df: pd.DataFrame, tickers=None) -> pd.DataFrame:
     if tickers is None:
-        tickers = ["NVDA", "GOOGL", "AVGO", "ARM", "TSM"]
+        tickers = ["NVDA", "GOOGL", "AVGO", "ARM", "TSM", "JPM", "BAC"]
     frames = []
 
     for ticker in tickers:

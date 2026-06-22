@@ -387,9 +387,9 @@ with tab_corr:
 with tab_coint:
     st.header("Cointegration Test")
     st.caption(
-        "Tests whether two non-stationary price series share a stable long-run relationship. "
-        "The past year is split into 4 quarterly windows. Each quarter produces its own "
-        "Engle-Granger p-value — 4 p-values in total, one per quarter."
+        "Tests whether two log-price series share a stable long-run relationship. "
+        "All computations use log(price). "
+        "Verdict is based on 5yr and 2yr Engle-Granger tests; quarterly (1yr) results are for reference only."
     )
 
     db_tickers_coint = _tickers()
@@ -417,25 +417,40 @@ with tab_coint:
         if cr:
             st.markdown("---")
 
-            # ── Section 1: ADF prerequisite banner (5-year basis) ────────────
-            adf_results = [cr["adf_a"], cr["adf_b"]]
-            stationary = [r for r in adf_results if r["is_stationary"]]
-            non_stationary = [r for r in adf_results if not r["is_stationary"]]
+            # ── Section 1: I(1) prerequisite banner (5-year log prices) ────────
+            adf_a, adf_b = cr["adf_a"], cr["adf_b"]
+            # Check I(1): level non-stationary AND first difference stationary
+            both_i1 = adf_a["is_i1"] and adf_b["is_i1"]
+            level_stationary = [r for r in [adf_a, adf_b] if r["is_stationary"]]
+            not_i1_due_to_diff = [
+                r for r in [adf_a, adf_b]
+                if not r["is_stationary"] and not r["is_diff_stationary"]
+            ]
 
-            if not stationary:
+            if both_i1:
                 st.success(
-                    f"✓ **{coint_sym_a}** (ADF p={cr['adf_a']['p_value']:.4f}) and "
-                    f"**{coint_sym_b}** (ADF p={cr['adf_b']['p_value']:.4f}) are both "
-                    "non-stationary over the past 5 years — proceeding to Engle-Granger test."
+                    f"✓ Both series confirmed I(1) on log prices (past 5 years) — "
+                    f"proceeding to Engle-Granger.  "
+                    f"**{coint_sym_a}**: level p={adf_a['p_value']:.4f}, diff p={adf_a['diff_p_value']:.4f}.  "
+                    f"**{coint_sym_b}**: level p={adf_b['p_value']:.4f}, diff p={adf_b['diff_p_value']:.4f}."
                 )
             else:
-                for r in stationary:
+                for r in level_stationary:
                     st.warning(
-                        f"⚠️ Alert: **{r['label']}** is stationary (ADF p={r['p_value']:.4f} < 0.05). "
-                        "Cointegration requires non-stationary individual series — interpret results with caution."
+                        f"⚠️ **{r['label']}** log price is stationary (level p={r['p_value']:.4f} < 0.05). "
+                        "Cointegration requires non-stationary levels — interpret results with caution."
                     )
-                for r in non_stationary:
-                    st.info(f"**{r['label']}** is non-stationary (ADF p={r['p_value']:.4f}).")
+                for r in not_i1_due_to_diff:
+                    st.warning(
+                        f"⚠️ **{r['label']}** may not be I(1): log price is non-stationary (level p={r['p_value']:.4f}) "
+                        f"but first difference is also non-stationary (diff p={r['diff_p_value']:.4f} > 0.05). "
+                        "Engle-Granger assumes I(1) series — interpret results with caution."
+                    )
+                for r in [adf_a, adf_b]:
+                    if r["is_i1"]:
+                        st.info(
+                            f"**{r['label']}** confirmed I(1): level p={r['p_value']:.4f}, diff p={r['diff_p_value']:.4f}."
+                        )
                 st.info("Proceeding to Engle-Granger test.")
 
             st.markdown("---")
@@ -443,20 +458,20 @@ with tab_coint:
             # ── Section 2: Engle-Granger (both directions) ───────────────────
             st.subheader("Engle-Granger Test (both directions)")
             st.caption(
-                "EG is not symmetric: regressing A on B vs B on A can produce different residuals "
-                "and flip the verdict. The primary direction (lower p-value) drives the final verdict."
+                "Each window estimates its own α and β independently via OLS on log prices. "
+                "EG is not symmetric — primary direction = lower p-value within each window."
             )
 
             def _render_eg_pair(eg_res, eg_dir, is_primary, period_label, line_color):
                 dep, indep = eg_dir.split("→")
                 badge = "★ Primary direction" if is_primary else "Reverse direction"
                 with st.container(border=True):
-                    st.markdown(f"**{badge} — `{dep}` regressed on `{indep}`**")
+                    st.markdown(f"**{badge} — `{dep} (Y)` regressed on `{indep} (X)`**")
                     bm1, bm2 = st.columns(2)
                     bm1.metric("Intercept α", f"{eg_res['alpha']:.4f}",
-                               help=f"ϵt = {dep} − (α + β·{indep})")
-                    bm2.metric("Hedge Ratio β", f"{eg_res['beta']:.4f}",
-                               help=f"1 unit of {dep} ≈ {eg_res['beta']:.4f} units of {indep}")
+                               help=f"log({dep}) = α + β · log({indep}) + ε")
+                    bm2.metric("Elasticity β", f"{eg_res['beta']:.4f}",
+                               help=f"1% change in {indep} ≈ {eg_res['beta']:.4f}% change in {dep}")
 
                     spread = eg_res["residuals"]
                     spread_mean = spread.mean()
@@ -471,7 +486,7 @@ with tab_coint:
                     fig_s.add_hline(y=spread_mean - spread_std, line=dict(color="#e53935", dash="dot", width=1), annotation_text="-1σ")
                     fig_s.update_layout(
                         title=f"Spread ({period_label}): {eg_dir}  [{spread.index[0].strftime('%b %Y')} → {spread.index[-1].strftime('%b %Y')}]",
-                        xaxis_title="Date", yaxis_title="Spread",
+                        xaxis_title="Date", yaxis_title="Log-Price Spread",
                         height=300, margin=dict(t=50),
                     )
                     st.plotly_chart(fig_s, use_container_width=True)
@@ -493,42 +508,67 @@ with tab_coint:
             _render_eg_pair(cr["eg_reverse"], cr["eg_reverse_direction"], False, "5yr", "#9C27B0")
 
             st.markdown("---")
-            st.markdown("##### Past 2 Years")
+            st.markdown("##### Past 2 Years — Fresh OLS on 2yr data")
             _render_eg_pair(cr["eg_2yr"],         cr["eg_direction_2yr"],         True,  "2yr", "#00897B")
             _render_eg_pair(cr["eg_reverse_2yr"], cr["eg_reverse_direction_2yr"], False, "2yr", "#F57C00")
 
+            # β comparison: 5yr vs 2yr for both directions
+            st.markdown("**β Comparison: 5yr vs 2yr OLS**")
+            ab5 = cr["eg_ab_5yr"]
+            ba5 = cr["eg_ba_5yr"]
+            ab2 = cr["eg_ab_2yr"]
+            ba2 = cr["eg_ba_2yr"]
+            ab_delta = ab2["beta"] - ab5["beta"]
+            ba_delta = ba2["beta"] - ba5["beta"]
+            bc1, bc2, bc3, bc4 = st.columns(4)
+            bc1.metric(
+                f"β  {coint_sym_a}(Y)→{coint_sym_b}(X)  5yr",
+                f"{ab5['beta']:.4f}",
+            )
+            bc2.metric(
+                f"β  {coint_sym_a}(Y)→{coint_sym_b}(X)  2yr",
+                f"{ab2['beta']:.4f}",
+                delta=f"{ab_delta:+.4f}",
+                help="2yr β minus 5yr β. A large positive or negative shift suggests the hedge ratio has drifted.",
+            )
+            bc3.metric(
+                f"β  {coint_sym_b}(Y)→{coint_sym_a}(X)  5yr",
+                f"{ba5['beta']:.4f}",
+            )
+            bc4.metric(
+                f"β  {coint_sym_b}(Y)→{coint_sym_a}(X)  2yr",
+                f"{ba2['beta']:.4f}",
+                delta=f"{ba_delta:+.4f}",
+                help="2yr β minus 5yr β.",
+            )
+
             st.markdown("---")
 
-            # ── Section 3: Quarterly P-Values ─────────────────────────────────
-            st.subheader("Quarterly Cointegration P-Values — Past 1 Year")
+            # ── Section 3: Quarterly P-Values (reference only, fresh per-quarter OLS) ──
+            st.subheader("Quarterly Cointegration P-Values — Past 1 Year (Reference)")
             st.caption(
-                "The past year is split into 4 equal quarters (Q1 = oldest, Q4 = most recent). "
-                "Each quarter runs Engle-Granger in both directions. "
-                "★ marks the primary direction (lower p-value), which determines pass/fail. "
-                "Pass condition: p < 0.05."
+                "Each quarter uses its own fresh OLS to estimate α and β (~63 trading days). "
+                "★ marks the lower p-value direction per quarter. "
+                "These results are for reference only — the overall verdict is based on the 5yr and 2yr tests."
             )
 
             q_cols = st.columns(4)
             for col, q in zip(q_cols, cr["quarters"]):
                 with col:
                     with st.container(border=True):
-                        start_str = q["start_date"].strftime("%b %d %Y")
-                        end_str   = q["end_date"].strftime("%b %d %Y")
                         st.markdown(f"**{q['label']}**")
-                        st.caption(f"{start_str} → {end_str}")
+                        st.caption(f"{q['start_date'].strftime('%b %d %Y')} → {q['end_date'].strftime('%b %d %Y')}")
 
                         p_ab = q["eg_ab"]["p_value"]
                         p_ba = q["eg_ba"]["p_value"]
                         ab_is_primary = p_ab <= p_ba
 
-                        # Direction A→B
-                        ab_label = f"{'★ ' if ab_is_primary else ''}{coint_sym_a} regressed on {coint_sym_b}"
-                        st.markdown(f"<small>{ab_label}</small>", unsafe_allow_html=True)
+                        ab_label = f"{'★ ' if ab_is_primary else ''}{coint_sym_a} (Y) on {coint_sym_b} (X)"
+                        st.markdown(f"<small>{ab_label}  β={q['eg_ab']['beta']:.3f}</small>", unsafe_allow_html=True)
                         st.metric("p-value", f"{p_ab:.4f}", label_visibility="collapsed")
 
-                        # Direction B→A
-                        ba_label = f"{'★ ' if not ab_is_primary else ''}{coint_sym_b} regressed on {coint_sym_a}"
-                        st.markdown(f"<small>{ba_label}</small>", unsafe_allow_html=True)
+                        ba_label = f"{'★ ' if not ab_is_primary else ''}{coint_sym_b} (Y) on {coint_sym_a} (X)"
+                        st.markdown(f"<small>{ba_label}  β={q['eg_ba']['beta']:.3f}</small>", unsafe_allow_html=True)
                         st.metric("p-value", f"{p_ba:.4f}", label_visibility="collapsed")
 
                         if q["passes"]:
@@ -538,12 +578,78 @@ with tab_coint:
 
             st.markdown("---")
             st.subheader("Final Verdict")
-            st.caption(f"{cr['quarters_passing']}/4 quarters passed the cointegration test.")
+            st.caption(
+                "PASS requires both the 5yr and 2yr primary EG tests to show cointegration (p < 0.05). "
+                f"Quarterly reference: {cr['quarters_passing']}/4 quarters showed cointegration (display only)."
+            )
+            vc1, vc2 = st.columns(2)
+            with vc1:
+                if cr["eg_5yr_passes"]:
+                    st.success(f"✓ 5-Year EG: Cointegrated  (p={cr['eg']['p_value']:.4f})")
+                else:
+                    st.error(f"✗ 5-Year EG: Not cointegrated  (p={cr['eg']['p_value']:.4f})")
+            with vc2:
+                if cr["eg_2yr_passes"]:
+                    st.success(f"✓ 2-Year EG: Cointegrated  (p={cr['eg_2yr']['p_value']:.4f})")
+                else:
+                    st.error(f"✗ 2-Year EG: Not cointegrated  (p={cr['eg_2yr']['p_value']:.4f})")
             pair_conc = pair_conclusion(cr["pair_passes"])
             if cr["pair_passes"]:
                 st.success(f"✓ {pair_conc}")
             else:
                 st.error(f"✗ {pair_conc}")
+
+            st.markdown("---")
+
+            # ── Section 4: Stability Diagnostics — Rolling β ─────────────────
+            st.subheader("Stability Diagnostics")
+            rb_dir = cr["rolling_beta_direction"]
+            rb_win = cr["rolling_beta_window"]
+            rb_y, rb_x = rb_dir.split("→")
+            beta_5yr = cr["eg"]["beta"]
+            st.caption(
+                f"Rolling {rb_win}-day OLS β for log({rb_y}) = α + β·log({rb_x}), computed on 5-year history. "
+                f"Dashed line = 5yr OLS β ({beta_5yr:.4f}). "
+                "Persistent drifts, sharp breaks, or sign flips indicate structural instability or regime shifts."
+            )
+            rb = cr["rolling_beta"].dropna()
+            rb_mean = rb.mean()
+            rb_std = rb.std()
+            fig_rb = go.Figure()
+            fig_rb.add_trace(go.Scatter(
+                x=rb.index, y=rb.values,
+                mode="lines", name=f"Rolling β ({rb_win}d)",
+                line=dict(color="#1565C0", width=1.5)
+            ))
+            fig_rb.add_hline(
+                y=beta_5yr,
+                line=dict(color="#e53935", dash="dash", width=1.5),
+                annotation_text=f"5yr OLS β = {beta_5yr:.4f}",
+                annotation_position="top left",
+            )
+            fig_rb.add_hline(
+                y=rb_mean + rb_std,
+                line=dict(color="#78909C", dash="dot", width=1),
+                annotation_text="+1σ",
+            )
+            fig_rb.add_hline(
+                y=rb_mean - rb_std,
+                line=dict(color="#78909C", dash="dot", width=1),
+                annotation_text="-1σ",
+            )
+            fig_rb.update_layout(
+                title=f"Rolling {rb_win}-Day β — {rb_dir}  [{rb.index[0].strftime('%b %Y')} → {rb.index[-1].strftime('%b %Y')}]",
+                xaxis_title="Date",
+                yaxis_title="β (Hedge Ratio)",
+                height=340,
+                margin=dict(t=50),
+            )
+            st.plotly_chart(fig_rb, use_container_width=True)
+            dm1, dm2, dm3, dm4 = st.columns(4)
+            dm1.metric("5yr OLS β", f"{beta_5yr:.4f}")
+            dm2.metric("Rolling β Mean", f"{rb_mean:.4f}")
+            dm3.metric("Rolling β Std", f"{rb_std:.4f}")
+            dm4.metric("Rolling β Range", f"{rb.min():.4f} → {rb.max():.4f}")
 
 # ─── Tab 4: Trading Signals ───────────────────────────────────────────────────
 with tab_signals:
