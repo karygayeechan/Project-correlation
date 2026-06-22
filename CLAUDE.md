@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Stock correlation analysis pipeline: fetches tech stock prices via yfinance, computes pairwise Pearson correlations (6m/12m/24m), stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, runs cointegration tests on 5-year and 2-year data (bidirectional EG + quarterly 1-year p-values), executes pairs-trading signals with a quarterly-fixed hedge ratio, and compares quarterly fundamentals for any two stocks with a 3-layer alert engine and AI-written fundamental briefing grounded exclusively in yfinance data.
+Stock correlation analysis pipeline: fetches stock prices via yfinance (NVDA, GOOGL, AVGO, ARM, TSM, JPM, BAC), computes pairwise Pearson correlations (6m/12m/24m), stores results in PostgreSQL, visualizes via Streamlit, monitors macro regime indicators (10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth, VIX, SMH/QQQ relative strength) with a 10-rule alert engine, generates AI-written regime commentary via the Claude API, runs full cointegration analysis (log-log EG across 5yr/2yr/quarterly windows, structural break detection, post-break re-test, AI break commentary grounded in web search), executes pairs-trading signals with a quarterly-fixed hedge ratio, and compares quarterly fundamentals for any two stocks with a 3-layer alert engine and AI-written fundamental briefing grounded exclusively in yfinance data.
 
 ## Environment Setup
 
@@ -49,7 +49,7 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 ## What's Built
 
 **ETL pipeline:**
-- `etl/extract.py` — fetches 5 years OHLCV for NVDA, GOOGL, AVGO, ARM, TSM via yfinance
+- `etl/extract.py` — fetches 5 years OHLCV for NVDA, GOOGL, AVGO, ARM, TSM, JPM, BAC via yfinance
 - `etl/transform.py` — reshapes wide → long; `compute_correlations()` produces **6m/12m/24m** Pearson pairs (1m removed)
 - `etl/load.py` — inserts companies, prices, upserts correlations, writes etl_log (no longer archives snapshots or calls commentary agent)
 
@@ -82,14 +82,17 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 - **Network Graph** — period radio: **24m / 60m** (default 24m); minimum |r| threshold default **0.65**
 
 **Cointegration (`Cointegration test/`):**
-- `cointegration.py` — three fetch windows:
-  - **5-year** (`days=365*5`): ADF prerequisite check (displayed as a compact banner, not a full table) + bidirectional EG spread charts
-  - **2-year** (`days=365*2`): additional bidirectional EG spread charts
-  - **1-year** (`days=365`): quarterly split into 4 equal windows (~63 trading days each) for EG p-values
-- Each EG section shows both directions (primary ★ = lower p-value, reverse); spread chart titles explicitly state the data period (e.g. `Spread (5yr): ARM→TSM`)
-- Quarterly cards show both directions with explicit "X regressed on Y" labels and ★ on the primary direction
-- ADF results hidden unless a series IS stationary (unexpected) — then an alert banner is shown
-- `conclusions.py` — plain-English verdict strings for each test result
+- `cointegration.py` — full pipeline; all computations use log(price); regression version 4 (OLS with constant on log prices) throughout:
+  - **I(1) check** — level + diff ADF on log prices for each series; `is_i1 = (level p > 0.05) AND (diff p < 0.05)`
+  - **5yr EG** — bidirectional OLS → `adfuller(residuals, autolag='AIC')`; verdict component 1
+  - **2yr EG** — fresh independent OLS; β comparison vs 5yr; verdict component 2
+  - **Quarterly** — fresh per-quarter OLS (~63 obs); display only, not verdict
+  - **Verdict** — PASS iff 5yr primary p < 0.05 AND 2yr primary p < 0.05
+  - **Stability diagnostics** — `compute_rolling_beta()` (rolling 252d OLS β) and `compute_rolling_eg_pvalue()` (rolling 252d EG p-value), both on 5yr primary direction
+  - **Structural break analysis** — `detect_structural_break()` runs Zivot-Andrews on 5yr residuals to find the sharpest inflection point; `identify_break_periods()` scans rolling EG p-value for stretches > 0.05 ≥ 30 days; `run_eg_post_break()` re-runs EG in both directions from the ZA break date onwards
+- `break_commentary.py` — on-demand AI agent: agentic loop with `web_search_20250305` tool; Claude issues search queries; client executes via Google News RSS (`_search_google_news()`); strict anti-hallucination system prompt requires every claim to cite a specific retrieved article in format `["Title", Source, Date]`; ~200 words; result cached in `st.session_state`
+- `conclusions.py` — plain-English verdict strings
+- Tab layout: I(1) banner → 5yr EG charts → 2yr EG charts + β comparison → quarterly cards → Final Verdict → Stability Diagnostics (rolling β + rolling EG p-value) → Structural Break Analysis (break periods, ZA result, AI commentary, post-break re-test)
 
 **Trading Signals (`Trading signals/`):**
 - `trading_signals.py` — **quarterly-fixed** hedge ratio β: estimated from a trailing 1-year (252-day) OLS at each calendar-quarter boundary, held constant for the full quarter. Z-score uses a 60–120 day rolling window (default 90). Generates LONG/SHORT/EXIT/HOLD signals; `position_B = −β_q × position_A`. Includes `quarter` column in output. Default pair: ARM/TSM.
@@ -118,6 +121,11 @@ FRED_API_KEY=<free_key>            # free from fred.stlouisfed.org — needed fo
 - **`correlation_history` retained in schema** — table is kept for backwards compatibility but ETL no longer writes to it; the regime agent does not use correlation snapshots.
 - **Quarterly-fixed β, not daily rolling** — `trading_signals.py` and `backtest.py` estimate β from a trailing 1-year OLS once per calendar quarter (at the quarter boundary), then hold it fixed for the entire quarter. This eliminates daily β noise and negative-beta windows that could invert the hedge. `BETA_WINDOW = 252` trading days; z-score window is separately configurable (60–120 days).
 - **Default pair is ARM/TSM** — set across all tabs (Rolling Correlation, Cointegration, Trading Signals, Backtest, Fundamental Comparison) because ARM/TSM is the primary analytical pair used throughout the project.
+- **Cointegration uses log-log regression (version 4)** — `log(Y) = α + β·log(X) + ε` with a constant. β is an elasticity (% change in Y per 1% change in X), not a raw price ratio. The constant absorbs scale differences. `adfuller(residuals, autolag='AIC')` selects lag length automatically. All four versions were benchmarked on JPM/BAC; version 4 was chosen as the standard.
+- **Cointegration verdict requires 5yr AND 2yr** — the 5yr test anchors the long-run relationship; the 2yr test confirms it holds in the recent regime. A pair that passed historically but broke structurally (e.g. JPM/BAC during 2022–2024 rate hikes) correctly FAILs the full test even if it passes the quarterly display.
+- **ZA break date is the sharpest inflection, not the worst point** — Zivot-Andrews picks the date where allowing a one-time level shift in the spread produces the most negative ADF statistic. This is the moment the spread changed direction most abruptly, typically at the onset of a structural event, not at the peak of divergence. The post-break re-test starts from this date.
+- **Break commentary is web-search grounded** — `break_commentary.py` uses an agentic loop with the `web_search_20250305` tool. The client executes each search via Google News RSS and passes real article titles/sources/dates as `tool_result` content. Claude's system prompt prohibits using background knowledge; every claim must cite a specific returned article. This prevents hallucination of source details.
+- **Cointegration results cached in session_state** — `cr` is stored under `st.session_state["coint_result"]` keyed by `f"coint_result_{sym_a}_{sym_b}"`. This prevents all tab content from disappearing when secondary buttons (e.g. "Generate Commentary") trigger Streamlit reruns. Cache is invalidated when the user switches the stock pair.
 - **Fundamental comparison is in-memory only** — no DB writes; `fetch_fundamentals()` is cached 6 hours in Streamlit (`@st.cache_data(ttl=21600)`). Quarterly fundamentals don't change intraday so a 6-hour TTL is sufficient without hammering yfinance.
 - **Fundamental commentary anti-hallucination** — `generate_fundamental_commentary()` passes a system prompt that explicitly prohibits Claude from using any information outside the supplied KEY METRICS and ALERTS blocks. This prevents the model from citing news, earnings calls, analyst estimates, or any external context not derived from the yfinance data in the prompt.
 - **QoQ convention in Fundamental Comparison** — all DataFrames are sorted most-recent first (`iloc[0]` = current quarter, `iloc[1]` = prior quarter). Every QoQ alert and every delta arrow in the comparison tables compares those two positions. A "Q1 2026" row always shows the change vs Q4 2025.
@@ -142,7 +150,6 @@ Files to keep in sync:
 ## Non-obvious Gotchas
 
 - **yfinance column naming**: extract.py flattens multi-level column tuples to strings like `"Close AAPL"` (space-separated). transform.py splits on spaces to parse ticker and field. Any yfinance output format change breaks both files.
-- **Hardcoded tickers**: `TICKERS` list is duplicated in both extract.py and transform.py — keep them in sync.
 - **Correlation windows**: "6m" ≈ 126 trading days, "12m" ≈ 252, "24m" ≈ 504, "60m" ≈ 1260. 1m was removed. Sort by date before computing daily returns.
 - **No test suite** — use each module's `if __name__ == "__main__"` block to smoke-test during development.
 - **Cointegration / Trading Signals / Backtest / Regime Detection / Fundamental Comparison modules live outside `app/`**: `Cointegration test/`, `Trading signals/`, `Backtest/`, `Regime detection agent/`, and `fundamental comparison agent/` are all added to `sys.path` at the top of `streamlit_app.py` — if you move any of them, update the corresponding `sys.path.insert` call.
@@ -157,3 +164,7 @@ Files to keep in sync:
 - **Fundamental Comparison uses `st.session_state` for loaded data** — results from `fetch_fundamentals()` are stored under `st.session_state["fd_data_a"]` / `"fd_data_b"` after the Load button is clicked. Switching sub-tabs (Income / Balance / Cash Flow / Quality) does not re-fetch. If the user changes the stock pickers without clicking Load, the displayed data is stale — the tab shows a notice.
 - **yfinance quarterly statement row names vary by ticker** — `fundamental_data.py` maps yfinance index names (e.g. `"Total Revenue"`) to display names via `INCOME_MAP`, `BALANCE_MAP`, `CASHFLOW_MAP`. If a row is absent for a given ticker (e.g. ARM has no EBITDA), the column is silently NaN — no crash. Check the mapping dicts if a metric unexpectedly shows "—" for all quarters.
 - **TSM reports in USD via yfinance ADR** — despite being a TWD-reporting company, the NYSE-listed ADR (TSM) is returned by yfinance in USD. No currency conversion warning is shown for TSM. A banner fires only when `ticker.info["currency"]` returns a non-USD value.
+- **Rolling EG p-value uses plain adfuller, not MacKinnon 2010** — `compute_rolling_eg_pvalue()` runs `adfuller(residuals, autolag='AIC')` (not `coint()`) at each rolling step for speed. This gives slightly lower p-values than the proper EG distribution but is acceptable for trend visualisation. The final PASS/FAIL verdict uses `run_engle_granger()` which uses the same plain ADF — both are consistent on this point.
+- **Break periods filter ≥ 30 days** — `identify_break_periods()` discards contiguous stretches of rolling p > 0.05 that last fewer than 30 calendar days. These are noise from the rolling window rather than genuine structural events. The 30-day threshold is hardcoded in the function call.
+- **Google News RSS returns recent articles** — `_search_google_news()` in `break_commentary.py` fetches from Google News RSS which typically returns articles from the past few weeks. For historical break periods (e.g. 2022–2024), the RSS may return retrospective or analytical articles about those events rather than contemporaneous ones. Claude's citation rules require it to cite only what was returned; if the search is sparse, the commentary will say so rather than fabricate sources.
+- **Hardcoded tickers in ETL**: `TICKERS` list is duplicated in both `etl/extract.py` and `etl/transform.py` — keep them in sync. Current list: NVDA, GOOGL, AVGO, ARM, TSM, JPM, BAC.

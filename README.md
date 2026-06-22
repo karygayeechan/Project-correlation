@@ -4,12 +4,12 @@ Analyzes stock pairs and monitors macro market regimes using a PostgreSQL databa
 
 ## What This Project Does
 
-1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 years across tickers: NVDA, GOOGL, AVGO, ARM, TSM (and any dynamically added tickers)
+1. **Extracts** daily OHLCV stock data from Yahoo Finance (via `yfinance`) for 5 years across tickers: NVDA, GOOGL, AVGO, ARM, TSM, JPM, BAC (and any dynamically added tickers)
 2. **Transforms** the raw data into normalized rows and computes pairwise return correlations over 6-month, 12-month, 24-month and 60-month windows
 3. **Loads** everything into PostgreSQL
-4. **Visualizes** correlations in a 7-tab Streamlit dashboard with interactive controls and ticker management 
+4. **Visualizes** correlations in a 7-tab Streamlit dashboard with interactive controls and ticker management
 5. **Monitors macro regime** — live indicator engine tracks 10Y Treasury yield, TIPS real yield, Nasdaq-100 breadth (% above 200DMA), VIX trend, and SMH/QQQ relative strength across 10 alert rules with severity levels and recent-crossing detection
-6. **Cointegration testing** — ADF on each series + bidirectional Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year, producing 4 p-values that show whether the relationship holds across each quarter
+6. **Cointegration testing** — log-log Engle-Granger (version 4: OLS with constant on log prices) run in both directions across three data windows (5yr, 2yr, quarterly 1yr); verdict requires 5yr AND 2yr to pass; stability diagnostics include rolling β and rolling EG p-value charts; structural break analysis detects break periods (Zivot-Andrews), re-tests post-break cointegration in both directions, and generates AI-written break commentary grounded in web-searched news articles
 7. **Trading signals** — **quarterly-fixed** hedge ratio β (trailing 1-year OLS, refreshed at each calendar-quarter boundary), z-score spread signals (LONG/SHORT/EXIT), position sizing, and PnL tracking
 8. **Backtesting** — 4-year training warm-up + 1-year out-of-sample evaluation with performance, risk, stability, and scalability metrics
 9. **AI regime commentary** — on-demand ~100-word Claude briefing summarising live macro conditions and triggered alerts; one entry cached per calendar day in the database
@@ -56,10 +56,11 @@ project_correlation/
 │   ├── api_client.py                     # HTTP client wrapping the API (used by Streamlit)
 │   └── streamlit_app.py                  # 7-tab Streamlit dashboard
 ├── Cointegration test/
-│   ├── cointegration.py                  # ADF + bidirectional Engle-Granger computation module
+│   ├── cointegration.py                  # I(1) check, EG tests, rolling diagnostics, structural break functions
+│   ├── break_commentary.py               # AI break-period commentary agent (web-search grounded)
 │   ├── conclusions.py                    # plain-English verdict strings
-│   ├── PLAN.md                           # implementation plan
-│   └── Cointegration test instruction    # original spec
+│   ├── PLAN.md                           # full implementation plan incl. agent prompt design
+│   └── Cointegration test instruction    # full specification
 ├── Trading signals/
 │   ├── trading_signals.py                # quarterly-fixed β, z-score signals, PnL
 │   ├── PLAN.md                           # implementation plan
@@ -116,7 +117,8 @@ streamlit run app/streamlit_app.py
 - [x] `Regime detection agent/data_collector.py` — fetches 10Y yield (yfinance `^TNX`), TIPS real yield (FRED `DFII10`), Nasdaq-100 breadth (computed across ~98 NDX components), VIX (`^VIX`), SMH/QQQ ratio + z-score
 - [x] `Regime detection agent/regime_alerts.py` — 10 alert rules: yield crossovers (50DMA, 200DMA, 20d ROC), TIPS level + trend + monthly rise, NDX breadth zones, VIX 20/100DMA, SMH/QQQ 100DMA + death cross
 - [x] `Regime detection agent/commentary.py` — on-demand ~100-word AI regime briefing via Claude; cached one per calendar day in `correlation_alerts`
-- [x] `Cointegration test/cointegration.py` — ADF on full-year series + **bidirectional** Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year; 4 EG p-values shown with per-quarter pass/fail; full-year spread charts for context
+- [x] `Cointegration test/cointegration.py` — full cointegration pipeline: I(1) check (level + diff ADF), bidirectional log-log EG (version 4) on 5yr/2yr/quarterly windows, rolling β, rolling EG p-value, Zivot-Andrews structural break detection, break period identification, post-break EG re-test (both directions)
+- [x] `Cointegration test/break_commentary.py` — AI break-period commentary agent: agentic loop with `web_search_20250305` tool, Google News RSS client-side execution, strict anti-hallucination (every claim must cite a specific article from search results)
 - [x] `Cointegration test/conclusions.py` — plain-English verdict strings
 - [x] `Trading signals/trading_signals.py` — **quarterly-fixed** β estimated from trailing 1-year OLS at each calendar-quarter boundary; z-score window 60–120 days (default 90); stateful positions with quarterly β, daily PnL
 - [x] `Backtest/backtest.py` — 4yr train / 1yr test split; quarterly-fixed β (inherited from trading_signals); performance, trading activity, risk, stability, and scalability metrics; in-memory only (no DB writes)
@@ -137,7 +139,7 @@ The sidebar provides a global ticker multiselect and date range that feed all ch
 | Tab | Type | Description |
 |---|---|---|
 | **Correlation** | Read | Three sub-tabs: **Heatmap** (pairwise Pearson r matrix; toggle tickers, period, end date; ranked pairs table), **Rolling** (pair correlation over time with selectable window: 21/42/63/126 days), **Network Graph** (circular graph; edge thickness/color encode correlation strength; threshold slider). |
-| **Cointegration** | Read | ADF test on the full-year series to confirm non-stationarity, then **bidirectional** Engle-Granger (A→B and B→A) run on **4 quarterly windows** within the past year. Each quarter card shows its own EG p-value and pass/fail badge. Overall verdict: all 4 quarters must pass. Full-year spread charts shown for context. Default pair: ARM/TSM. |
+| **Cointegration** | Read | Six sections: **(1) I(1) check** — level + diff ADF on log prices; **(2) 5yr EG** — bidirectional log-log Engle-Granger with spread charts and stats; **(3) 2yr EG** — fresh OLS confirmation with β comparison (5yr vs 2yr); **(4) Quarterly** — fresh per-quarter EG (display only); **(5) Final Verdict** — PASS iff 5yr AND 2yr both p < 0.05; **(6) Stability Diagnostics + Structural Break Analysis** — rolling β, rolling EG p-value, Zivot-Andrews break detection, break period timeline, post-break EG re-test (both directions), and on-demand AI commentary grounded in web-searched news. Default pair: ARM/TSM. |
 | **Trading Signals** | Read | Quarterly-fixed β pairs strategy for any two tickers. β estimated from trailing 1-year OLS at each calendar-quarter boundary, held fixed for the quarter — visualised as a step-function chart. Z-score window: 60–120 days (default 90). Shows current trade instruction, z-score chart, quarterly β chart, and signal log (with active quarter column). Hypothetical 5-year PnL at bottom. Default pair: ARM/TSM. |
 | **Backtest (4yr/1yr)** | Read | Out-of-sample evaluation: 4-year warm-up (calibrates quarterly β) + last 1 year as test slice. Five sections: Performance (Sharpe, Calmar, drawdown, win rate), Trading Activity (trade count, holding period, cost sensitivity), Risk (vol, VaR, CVaR, skew, kurtosis), Stability (rolling ADF, z-score histogram, quarterly β step-function + update count, rolling half-life), Scalability (1×/2×/5× position size comparison). Default pair: ARM/TSM. |
 | **Regime Alerts** | Read | Two sections: **Macro Regime Indicators** — live 5-indicator dashboard with 10 color-coded alert rules (🔴 critical / 🟡 warning / 🟢 OK), expandable per-indicator blocks, and triggered-alerts summary table; **AI Regime Commentary** — on-demand ~100-word Claude briefing on rate environment, breadth, volatility, and sector momentum; last 5 days of history shown. |

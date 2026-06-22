@@ -1,86 +1,72 @@
-Three data periods are used. Each serves a distinct purpose. All windows end on today's date.
-All computations use log(price) throughout.
-
-Each window estimates its own α and β independently via OLS — no cross-window parameter sharing.
+All computations use log(price) throughout. Each data window estimates its own α and β
+independently via OLS — no cross-window parameter sharing.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 1 — I(1) PREREQUISITE CHECK  |  Data period: PAST 5 YEARS
+STEP 1 — I(1) PREREQUISITE CHECK  |  5-year data
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-For each series, run two ADF tests on log(price):
+For each series, run two ADF tests on log(price) with autolag='AIC':
   (a) Level test:      adfuller(log_price, autolag='AIC')
-  (b) Difference test: adfuller(log_price.diff().dropna(), autolag='AIC')   [= log returns]
+  (b) Difference test: adfuller(log_price.diff().dropna(), autolag='AIC')  [= log returns]
 
-A series is I(1) if BOTH conditions hold:
-  • Level p > 0.05 — log price is non-stationary ✓
-  • Diff  p < 0.05 — log returns are stationary  ✓
+A series is I(1) if: level p > 0.05 (non-stationary) AND diff p < 0.05 (stationary returns).
 
 Display as a compact banner:
-  • Both I(1) → green success banner, show level and diff p-values for each ticker.
-  • Level non-stationary but diff also non-stationary (may be I(2)) → amber warning; still proceed.
-  • Level stationary (unusual) → amber warning; still proceed.
-
-autolag='AIC' is used for all adfuller() calls throughout the module.
+  • Both I(1) → green success, show level and diff p-values for each ticker.
+  • Level non-stationary but diff also non-stationary → amber warning (possibly I(2)); proceed anyway.
+  • Level stationary (unusual) → amber warning; proceed anyway.
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 2a — 5-YEAR EG TEST  (long-run reference)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Regression on 5-year log prices:   log(Y) = α₅ + β₅ · log(X) + ε
+Regression:  log(Y) = α₅ + β₅ · log(X) + ε   [Version 4: OLS with constant on log prices]
 
-Run OLS in BOTH directions (A=Y, B=X) and (B=Y, A=X) on the 5-year data.
-For each direction: estimate α₅, β₅ → compute residuals → ADF(residuals, autolag='AIC').
-Cointegrated = p < 0.05.
+Run in BOTH directions on 5-year data. For each direction:
+  OLS → residuals → adfuller(residuals, autolag='AIC') → p-value
+Primary direction = lower 5yr p-value.  Cointegrated = p < 0.05.
 
-Primary direction = lower 5yr p-value.
-
-Show two spread charts (primary ★ and reverse) each containing:
-  - Log-price spread (residuals) over time with ±1σ bands and mean line
-  - α₅, β₅ metrics
-  - ADF test statistic, p-value, critical values (1%/5%/10%)
+Show two spread charts (primary ★ and reverse) each with:
+  - Log-price residuals over time, ±1σ bands, mean line
+  - α₅, β₅ metrics, ADF stat, p-value, critical values (1%/5%/10%)
   - Verdict: Cointegrated ✓ or Not cointegrated ✗
-  - Chart title: Spread (5yr): TICKER_Y→TICKER_X  [Mon YYYY → Mon YYYY]
-
-Label each direction: "TICKER_Y (Y) regressed on TICKER_X (X)"
+  - Label format: "TICKER_Y (Y) regressed on TICKER_X (X)"
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STEP 2b — 2-YEAR EG TEST  (recent confirmation + β comparison)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Regression on 2-year log prices:   log(Y) = α₂ + β₂ · log(X) + ε
-
 Fresh OLS on 2-year data — α₂ and β₂ are re-estimated independently (NOT fixed from 5yr).
-Run in BOTH directions; show both p-values. Primary direction = lower 2yr p-value (may differ
-from the 5yr primary direction).
+Run in BOTH directions. Primary direction = lower 2yr p-value (may differ from 5yr primary).
 
 Show two spread charts (same format as 5yr), then a β Comparison block:
 
   β Comparison: 5yr vs 2yr OLS
-  ┌────────────────────┬──────────┬──────────┬────────┐
-  │ Direction          │ β (5yr)  │ β (2yr)  │ Change │
-  ├────────────────────┼──────────┼──────────┼────────┤
-  │ A (Y) → B (X)     │  β₅_AB   │  β₂_AB   │  Δ     │
-  │ B (Y) → A (X)     │  β₅_BA   │  β₂_BA   │  Δ     │
-  └────────────────────┴──────────┴──────────┴────────┘
+  ┌──────────────────┬─────────┬─────────┬────────┐
+  │ Direction        │ β (5yr) │ β (2yr) │ Change │
+  ├──────────────────┼─────────┼─────────┼────────┤
+  │ A (Y) → B (X)   │  β₅_AB  │  β₂_AB  │   Δ    │
+  │ B (Y) → A (X)   │  β₅_BA  │  β₂_BA  │   Δ    │
+  └──────────────────┴─────────┴─────────┴────────┘
 
-A large or persistent β shift suggests structural drift in the relationship.
+A large Δ suggests the hedge ratio has drifted in the recent period.
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 3 — QUARTERLY P-VALUES  |  Data: PAST 1 YEAR  (display only)
+STEP 3 — QUARTERLY P-VALUES  |  1-year data  (display only)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-These results are FOR DISPLAY ONLY and do NOT affect the overall pass/fail verdict.
+FOR DISPLAY ONLY — does not affect verdict.
 
-Fresh OLS is computed per quarter (~63 trading days each, Q1 = oldest, Q4 = most recent).
-Both directions are shown per quarter, each with its own independently estimated α and β.
+Fresh OLS per quarter (~63 trading days, Q1 = oldest, Q4 = most recent).
+Both directions shown per quarter with their own independently estimated β.
 
-Each quarter card shows:
+Each quarter card:
   - Date range
   - ★ Lower p-value direction: "TICKER_Y (Y) on TICKER_X (X)  β=X.XXX" + p-value
-  -   Other direction: "TICKER_Y (Y) on TICKER_X (X)  β=X.XXX" + p-value
+  -   Other direction: same format
   - Cointegrated ✓ or Not cointegrated ✗ (based on ★ direction p < 0.05)
 
 Below cards: "X/4 quarters showed cointegration (reference only)."
@@ -90,32 +76,109 @@ Below cards: "X/4 quarters showed cointegration (reference only)."
 STEP 4 — OVERALL VERDICT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PASS iff:
-  • 5yr primary EG p-value < 0.05   AND
-  • 2yr primary EG p-value < 0.05
+PASS iff: 5yr primary p < 0.05  AND  2yr primary p < 0.05.
+Quarterly results do NOT determine the verdict.
 
-Quarterly (1yr) results do NOT determine the verdict.
-
-Display two-column: 5yr result (✓/✗ + p) | 2yr result (✓/✗ + p)
-Final PASS/FAIL banner. Quarterly reference count as footnote.
+Display: two-column (5yr ✓/✗ + p | 2yr ✓/✗ + p) → final PASS/FAIL banner.
+Footnote: quarterly reference count.
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STABILITY DIAGNOSTICS — Rolling β Chart
+STEP 5 — STABILITY DIAGNOSTICS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Computed separately from the EG tests. Uses 5-year history in the primary direction.
+Two charts computed separately from the EG tests, both using 5-year history in the primary
+direction (lower 5yr p-value).
 
+─── Rolling β Chart ────────────────────────────────
 Rolling 252-day OLS β for log(Y) = α + β · log(X):
   At each date t: regress log(Y_{t-251:t}) on log(X_{t-251:t}) → record β_t.
 
-Chart:
-  - Rolling β line over 5-year history
-  - Fixed 5yr β (from the 5yr EG OLS) as a red dashed reference line
+Chart shows:
+  - Rolling β line over 5 years
+  - 5yr OLS β (from Step 2a primary) as a red dashed reference line
   - ±1σ bands of the rolling β distribution (gray dotted)
+Summary metrics: 5yr OLS β | Rolling mean | Rolling std | Range (min → max)
 
-Summary metrics below chart:
-  Fixed 5yr β | Rolling β Mean | Rolling β Std | Rolling β Range (min → max)
+Purpose: reveal hedge ratio volatility, structural breaks, regime shifts.
 
-Purpose: reveal hedge ratio volatility, structural breaks, regime shifts over time.
-Displayed as "Stability Diagnostics" section in the Cointegration tab, below the Final Verdict.
+─── Rolling EG P-Value Chart ───────────────────────
+Rolling 252-day EG p-value: at each date t, run OLS + adfuller(residuals) on the trailing
+252-day window. Plot the resulting p-value series over 5 years.
+
+Chart shows:
+  - Rolling EG p-value line
+  - Red dashed threshold at 0.05
+  - Vertical dotted line at the ZA-detected break date (if any)
+Caption under chart explains the ZA cut-off date:
+  "This is not the point where the relationship diverges the most. It is the point where
+   the relationship changes most abruptly — the sharpest bend in the spread series. The ZA
+   test finds this by trying every date as a potential break point and selecting the one where
+   allowing a level shift there produces the strongest evidence of stationarity on both sides."
+
+Purpose: show when cointegration was active vs. broken over time.
+Note: uses plain adfuller (not MacKinnon 2010 EG table) for computational efficiency —
+this chart is for trend visualisation only, not for final PASS/FAIL decisions.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 6 — STRUCTURAL BREAK ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Purpose: identify whether a full-window FAIL is caused by a temporary structural event
+rather than a permanent absence of cointegration; if so, test whether the pair is cointegrated
+in the post-break regime.
+
+─── Break period identification ────────────────────
+Scan the rolling EG p-value series for contiguous stretches where p > 0.05.
+Filter to stretches ≥ 30 calendar days (shorter ones treated as noise).
+Sort by duration; display chronologically with the longest marked as "main break".
+
+─── Zivot-Andrews structural break test ────────────
+Run zivot_andrews(residuals, regression='c', autolag='t-stat') on the 5yr primary residuals.
+The ZA test tries every candidate date in the interior of the sample and selects the one
+where allowing a one-time level shift produces the most negative ADF statistic — i.e. the
+sharpest bend in the spread, not the point of maximum divergence.
+
+Report: ZA stat, p-value, detected break date.
+If ZA p < 0.05: formally detected — show amber warning with break date.
+If ZA p ≥ 0.05: candidate date shown with info note; post-break re-test still runs.
+
+─── Post-break EG re-test ──────────────────────────
+Start date = ZA-detected break date.
+Run full EG in BOTH directions on data from break_date → today:
+  - Fresh OLS per direction (re-estimates α and β from the post-break window)
+  - adfuller(residuals, autolag='AIC') → p-value
+  - ★ primary = lower post-break p-value
+  - Show α, β, ADF stat, p-value, crit 5%, N obs for each direction
+  - Verdict: Cointegrated ✓ or ✗ per direction
+
+If either direction passes (p < 0.05):
+  "Pair is cointegrated in the post-break regime — structural break was event-driven."
+If both fail:
+  "Break appears to be a permanent regime shift."
+
+Minimum 60 observations required; otherwise show "insufficient data" notice.
+
+─── AI Break Period Commentary ─────────────────────
+On-demand button: "Generate Commentary (AI)"
+Triggers only when at least one break period ≥ 30 days has been identified.
+Result is cached in st.session_state[f"break_commentary_{A}_{B}"] and survives reruns.
+
+Agent design → see `break_commentary.py` section in PLAN.md for full prompt and logic.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REGRESSION VERSION REFERENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Four possible regression specifications (for reference):
+  Version 1: OLS(price, price) no constant    → ADF on (A − β·B)
+  Version 2: OLS(price, const+price)          → ADF on residuals
+  Version 3: OLS(log, log) no constant        → ADF on (logA − β·logB)
+  Version 4: OLS(log, const+log) ← CURRENT   → ADF on residuals
+
+Version 4 is used throughout because: log-log gives β an economically meaningful elasticity
+interpretation; the constant absorbs scale differences between tickers; adfuller on OLS
+residuals with autolag='AIC' selects lag length automatically rather than defaulting to a
+statsmodels heuristic.
