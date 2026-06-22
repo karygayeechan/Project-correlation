@@ -9,6 +9,7 @@ from statsmodels.regression.linear_model import OLS
 from statsmodels.tools import add_constant
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.tsa.stattools import coint as eg_coint
+from statsmodels.tsa.stattools import zivot_andrews
 
 load_dotenv()
 
@@ -146,6 +147,126 @@ def compute_rolling_beta(
     return pd.Series(betas, index=series_y.index, name="rolling_beta")
 
 
+def compute_rolling_eg_pvalue(
+    series_y: pd.Series, series_x: pd.Series, window: int = ROLLING_BETA_WINDOW
+) -> pd.Series:
+    """Rolling 1yr EG p-value: at each date, OLS log(Y) on log(X)+const, ADF on residuals.
+
+    Uses plain adfuller() (not coint()) for speed — this is for trend visualisation only,
+    not for the final PASS/FAIL verdict. p < 0.05 band indicates cointegration at that point.
+    """
+    log_y = np.log(series_y.values.astype(float))
+    log_x = np.log(series_x.values.astype(float))
+    p_values = np.full(len(log_y), np.nan)
+    for i in range(window - 1, len(log_y)):
+        y_w = log_y[i - window + 1 : i + 1]
+        x_w = log_x[i - window + 1 : i + 1]
+        try:
+            resid = OLS(y_w, add_constant(x_w)).fit().resid
+            p_values[i] = adfuller(resid, autolag="AIC")[1]
+        except Exception:
+            pass
+    return pd.Series(p_values, index=series_y.index, name="rolling_eg_pvalue")
+
+
+def detect_structural_break(residuals: pd.Series) -> dict:
+    """Zivot-Andrews test for a unit root allowing one unknown structural break.
+
+    H0: unit root (no cointegration, even allowing a break)
+    H1: stationary with a one-time level shift (cointegration interrupted by a break)
+
+    Small p-value → reject H0 → spread IS stationary with a break → cointegration holds
+    but was disrupted by a structural event at the detected break date.
+    """
+    clean = residuals.dropna()
+    try:
+        za_stat, za_pvalue, za_cvt, za_baselag, za_bp = zivot_andrews(
+            clean.values, regression="c", autolag="t-stat"
+        )
+        break_date = clean.index[za_bp]
+        return {
+            "stat": float(za_stat),
+            "pvalue": float(za_pvalue),
+            "critical_values": {k: float(v) for k, v in za_cvt.items()},
+            "break_date": break_date,
+            "breakpoint_idx": int(za_bp),
+            "is_break": za_pvalue < 0.05,
+        }
+    except Exception:
+        return None
+
+
+def run_eg_post_break(
+    series_a: pd.Series, series_b: pd.Series, break_date, sym_a: str, sym_b: str
+) -> dict | None:
+    """Re-run EG in both directions on data strictly after the structural break date.
+
+    Re-estimates α and β independently for each direction from the post-break window.
+    Primary direction = lower p-value, same logic as the main 5yr/2yr tests.
+    Returns None if fewer than 60 observations remain after the break.
+    """
+    a_post = series_a[series_a.index > break_date]
+    b_post = series_b[series_b.index > break_date]
+    if len(a_post) < 60:
+        return None
+
+    eg_ab = run_engle_granger(a_post, b_post)  # A = Y, B = X
+    eg_ba = run_engle_granger(b_post, a_post)  # B = Y, A = X
+
+    if eg_ab["p_value"] <= eg_ba["p_value"]:
+        primary, reverse = eg_ab, eg_ba
+        primary_direction   = f"{sym_a}→{sym_b}"
+        reverse_direction   = f"{sym_b}→{sym_a}"
+    else:
+        primary, reverse = eg_ba, eg_ab
+        primary_direction   = f"{sym_b}→{sym_a}"
+        reverse_direction   = f"{sym_a}→{sym_b}"
+
+    n_obs        = len(a_post)
+    window_start = a_post.index[0]
+    window_end   = a_post.index[-1]
+
+    for d in (primary, reverse):
+        d["n_obs"]        = n_obs
+        d["window_start"] = window_start
+        d["window_end"]   = window_end
+
+    return {
+        "primary":           primary,
+        "reverse":           reverse,
+        "primary_direction": primary_direction,
+        "reverse_direction": reverse_direction,
+        "n_obs":             n_obs,
+        "window_start":      window_start,
+        "window_end":        window_end,
+    }
+
+
+def identify_break_periods(
+    rolling_pvalue: pd.Series, threshold: float = 0.05, min_days: int = 30
+) -> list[dict]:
+    """Scan rolling EG p-value series for contiguous stretches above threshold.
+
+    Returns list of break periods sorted longest-first, filtered to >= min_days.
+    Each dict has: start, end, days.
+    """
+    clean = rolling_pvalue.dropna()
+    above = clean > threshold
+    periods, in_break, bp_start = [], False, None
+    for dt, is_above in above.items():
+        if is_above and not in_break:
+            in_break, bp_start = True, dt
+        elif not is_above and in_break:
+            in_break = False
+            periods.append({"start": bp_start, "end": dt, "days": (dt - bp_start).days})
+    if in_break:
+        periods.append({"start": bp_start, "end": clean.index[-1],
+                        "days": (clean.index[-1] - bp_start).days})
+    periods = [p for p in periods if p["days"] >= min_days]
+    periods.sort(key=lambda x: x["days"], reverse=True)
+    return periods
+
+
 def run_all(sym_a: str, sym_b: str) -> dict:
     """Run full cointegration analysis across three data windows.
 
@@ -229,8 +350,23 @@ def run_all(sym_a: str, sym_b: str) -> dict:
 
     quarters_passing = sum(q["passes"] for q in quarters)
 
-    # ── Stability diagnostics: rolling β (5yr, primary direction) ────────────
+    # ── Stability diagnostics: rolling β + rolling EG p-value (5yr primary) ──
     rolling_beta = compute_rolling_beta(prim_y_5yr, prim_x_5yr, window=ROLLING_BETA_WINDOW)
+    rolling_eg_pvalue = compute_rolling_eg_pvalue(prim_y_5yr, prim_x_5yr, window=ROLLING_BETA_WINDOW)
+
+    # ── Structural break analysis ─────────────────────────────────────────────
+    sb = detect_structural_break(eg_primary["residuals"])
+    break_periods = identify_break_periods(rolling_eg_pvalue)
+
+    # Post-break re-test: start from the ZA-detected break date.
+    # ZA identifies the single point where the structural break is most likely to have occurred.
+    eg_post_break = None
+    post_break_start_date = None
+    if sb is not None:
+        post_break_start_date = sb["break_date"]
+        eg_post_break = run_eg_post_break(
+            series_a_5yr, series_b_5yr, post_break_start_date, sym_a, sym_b
+        )
 
     return {
         "sym_a": sym_a,
@@ -263,6 +399,12 @@ def run_all(sym_a: str, sym_b: str) -> dict:
         "rolling_beta": rolling_beta,
         "rolling_beta_direction": eg_direction,
         "rolling_beta_window": ROLLING_BETA_WINDOW,
+        "rolling_eg_pvalue": rolling_eg_pvalue,
+        # Structural break analysis
+        "structural_break": sb,
+        "break_periods": break_periods,
+        "post_break_start_date": post_break_start_date,
+        "eg_post_break": eg_post_break,
     }
 
 

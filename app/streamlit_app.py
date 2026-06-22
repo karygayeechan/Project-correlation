@@ -17,6 +17,7 @@ from api_client import run_etl as etl_run, remove_ticker_from_db, add_ticker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Cointegration test"))
 from cointegration import run_all as coint_run_all
+from break_commentary import generate_break_commentary
 from conclusions import adf_conclusion, eg_conclusion, pair_conclusion
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Trading signals"))
@@ -406,15 +407,25 @@ with tab_coint:
 
     run_coint = st.button("Run Cointegration Test", type="primary")
 
+    # Clear cached result if the user changes the pair
+    coint_cache_key = f"coint_result_{coint_sym_a}_{coint_sym_b}"
     if run_coint:
         with st.spinner(f"Running tests for {coint_sym_a} / {coint_sym_b}…"):
             try:
                 cr = coint_run_all(coint_sym_a, coint_sym_b)
+                st.session_state["coint_result"] = cr
+                st.session_state["coint_result_key"] = coint_cache_key
             except Exception as exc:
                 st.error(f"Test failed: {exc}")
                 cr = None
 
-        if cr:
+    # Restore cached result on reruns triggered by other buttons (e.g. commentary)
+    elif st.session_state.get("coint_result_key") == coint_cache_key:
+        cr = st.session_state.get("coint_result")
+    else:
+        cr = None
+
+    if cr:
             st.markdown("---")
 
             # ── Section 1: I(1) prerequisite banner (5-year log prices) ────────
@@ -650,6 +661,172 @@ with tab_coint:
             dm2.metric("Rolling β Mean", f"{rb_mean:.4f}")
             dm3.metric("Rolling β Std", f"{rb_std:.4f}")
             dm4.metric("Rolling β Range", f"{rb.min():.4f} → {rb.max():.4f}")
+
+            st.markdown("---")
+
+            # ── Section 6: Structural Break Analysis ─────────────────────────
+            st.subheader("Structural Break Analysis")
+            sb_res = cr["structural_break"]
+            rb_pv = cr["rolling_eg_pvalue"].dropna()
+
+            # Rolling EG p-value chart
+            st.caption(
+                f"Rolling {cr['rolling_beta_window']}-day EG p-value ({rb_dir}). "
+                "Regions below the dashed 0.05 line indicate cointegration was active at that point. "
+                "Breaks above the line reveal when the relationship broke down. "
+                "p-values are from ADF on OLS residuals (trend visualisation — same direction as primary EG)."
+            )
+            fig_pv = go.Figure()
+            fig_pv.add_trace(go.Scatter(
+                x=rb_pv.index, y=rb_pv.values,
+                mode="lines", name="Rolling EG p-value",
+                line=dict(color="#1565C0", width=1.5),
+                fill="tozeroy", fillcolor="rgba(21,101,192,0.08)",
+            ))
+            fig_pv.add_hline(
+                y=0.05,
+                line=dict(color="#e53935", dash="dash", width=1.5),
+                annotation_text="p = 0.05 threshold",
+                annotation_position="top left",
+            )
+            if sb_res is not None:
+                fig_pv.add_vline(
+                    x=sb_res["break_date"].timestamp() * 1000,
+                    line=dict(color="#FF6F00", dash="dot", width=1.5),
+                    annotation_text=f"ZA break: {sb_res['break_date'].strftime('%b %Y')}",
+                    annotation_position="top right",
+                )
+            fig_pv.update_layout(
+                title=f"Rolling {cr['rolling_beta_window']}-Day EG P-Value — {rb_dir}",
+                xaxis_title="Date", yaxis_title="p-value",
+                yaxis=dict(range=[0, 1]),
+                height=300, margin=dict(t=50),
+            )
+            st.plotly_chart(fig_pv, use_container_width=True)
+            if sb_res is not None:
+                st.caption(
+                    f"The vertical line marks the ZA-detected cut-off date ({sb_res['break_date'].strftime('%d %b %Y')}). "
+                    "This is not the point where the relationship diverges the most — that would be somewhere in the middle of the disruption period. "
+                    "It is the point where the relationship changes most abruptly: the sharpest bend in the spread series. "
+                    "The ZA test finds this by trying every date as a potential break point and selecting the one where "
+                    "allowing a level shift there produces the strongest evidence of stationarity on both sides of the cut."
+                )
+
+            # ── Break periods (precomputed from rolling EG p-value) ──────────
+            break_periods = cr["break_periods"]
+            chrono_breaks = sorted(break_periods, key=lambda x: x["start"])
+            main_break = break_periods[0] if break_periods else None
+
+            if chrono_breaks:
+                st.markdown("**Identified Break Period(s)** *(rolling EG p > 0.05, ≥ 30 days)*")
+                for bp in chrono_breaks:
+                    is_main = main_break and bp["start"] == main_break["start"]
+                    tag = " — **main break**" if is_main else ""
+                    st.markdown(
+                        f"- {bp['start'].strftime('%d %b %Y')} → "
+                        f"{bp['end'].strftime('%d %b %Y')} "
+                        f"({bp['days']} calendar days){tag}"
+                    )
+                st.caption(
+                    f"Rolling window = {cr['rolling_beta_window']} trading days. "
+                    "These dates mark when the break entered/exited the rolling window — "
+                    "the underlying event typically occurred somewhat earlier than the start date shown."
+                )
+            else:
+                st.success("No sustained break periods (≥ 30 days) identified.")
+
+            # ── Break period commentary (AI, on demand) ───────────────────────
+            if chrono_breaks and main_break:
+                st.markdown("**Break Period Commentary**")
+                commentary_key = f"break_commentary_{coint_sym_a}_{coint_sym_b}"
+                if st.button("Generate Commentary (AI)", key="btn_break_commentary"):
+                    with st.spinner("Analysing break period…"):
+                        try:
+                            commentary = generate_break_commentary(
+                                sym_a=coint_sym_a,
+                                sym_b=coint_sym_b,
+                                break_start=main_break["start"],
+                                break_end=main_break["end"],
+                                break_days=main_break["days"],
+                                za_break_date=sb_res["break_date"] if sb_res else None,
+                            )
+                            st.session_state[commentary_key] = commentary
+                        except Exception as exc:
+                            st.error(f"Commentary generation failed: {exc}")
+
+                if commentary_key in st.session_state:
+                    st.info(st.session_state[commentary_key])
+
+            st.markdown("---")
+
+            # Zivot-Andrews structural break test result
+            if sb_res is not None:
+                bd = sb_res["break_date"].strftime("%d %b %Y")
+                if sb_res["is_break"]:
+                    st.warning(
+                        f"⚠️ Zivot-Andrews formally detected a structural break on **{bd}** "
+                        f"(ZA stat={sb_res['stat']:.4f}, p={sb_res['pvalue']:.4f} < 0.05). "
+                        "The spread is stationary with a one-time level shift — cointegration was "
+                        "disrupted by an event around this date."
+                    )
+                else:
+                    st.info(
+                        f"Zivot-Andrews candidate break date: **{bd}** "
+                        f"(ZA stat={sb_res['stat']:.4f}, p={sb_res['pvalue']:.4f}). "
+                        "The test cannot formally reject a unit root even allowing for a break, "
+                        "but the rolling p-value chart above may still show recent cointegration. "
+                        "The post-break re-test below uses this date regardless."
+                    )
+
+                # Post-break EG re-test — both directions, start = ZA break date
+                pb = cr["eg_post_break"]
+                st.markdown(
+                    f"**Post-Break EG Re-Test** — data from **{bd}** onwards "
+                    f"(both directions; start = ZA-detected break date)"
+                )
+                if pb is not None:
+                    pb_start = pb["window_start"].strftime("%d %b %Y")
+                    pb_end   = pb["window_end"].strftime("%d %b %Y")
+                    st.caption(
+                        f"Fresh OLS on {pb['n_obs']} observations ({pb_start} → {pb_end}). "
+                        "α and β re-estimated from the post-break window. "
+                        "★ = lower p-value direction."
+                    )
+
+                    def _render_pb_direction(eg_res, direction, is_primary):
+                        dep, indep = direction.split("→")
+                        badge = "★ Primary" if is_primary else "Reverse"
+                        with st.container(border=True):
+                            st.markdown(f"**{badge} — `{dep} (Y)` regressed on `{indep} (X)`**")
+                            c1, c2, c3, c4, c5 = st.columns(5)
+                            c1.metric("α", f"{eg_res['alpha']:.4f}")
+                            c2.metric("β", f"{eg_res['beta']:.4f}")
+                            c3.metric("ADF Stat", f"{eg_res['stat']:.4f}")
+                            c4.metric("P-Value", f"{eg_res['p_value']:.4f}")
+                            c5.metric("Crit 5%", f"{eg_res['critical_values']['5%']:.4f}")
+                            if eg_res["is_cointegrated"]:
+                                st.success(f"✓ Cointegrated post-break (p={eg_res['p_value']:.4f})")
+                            else:
+                                st.error(f"✗ Not cointegrated post-break (p={eg_res['p_value']:.4f})")
+
+                    _render_pb_direction(pb["primary"], pb["primary_direction"], is_primary=True)
+                    _render_pb_direction(pb["reverse"], pb["reverse_direction"], is_primary=False)
+
+                    if pb["primary"]["is_cointegrated"] or pb["reverse"]["is_cointegrated"]:
+                        st.success(
+                            "At least one direction is cointegrated post-break — the structural break "
+                            "was event-driven and the long-run relationship has resumed. "
+                            "This pair may be viable for trading in the current regime."
+                        )
+                    else:
+                        st.error(
+                            "Neither direction is cointegrated post-break — the break appears to be "
+                            "a permanent regime shift, not a temporary disruption."
+                        )
+                else:
+                    st.info("Fewer than 60 observations remain after the break date — re-test not reliable.")
+            else:
+                st.info("Structural break analysis could not be computed for this pair.")
 
 # ─── Tab 4: Trading Signals ───────────────────────────────────────────────────
 with tab_signals:
