@@ -21,7 +21,14 @@ from break_commentary import generate_break_commentary
 from conclusions import adf_conclusion, eg_conclusion, pair_conclusion
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Trading signals"))
-from trading_signals import fetch_prices as ts_fetch_prices, compute_rolling_signals, signal_translation
+from trading_signals import (
+    fetch_prices as ts_fetch_prices,
+    compute_rolling_signals,
+    generate_signals,
+    compute_half_life,
+    compute_volatility_regime,
+    signal_translation,
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Backtest"))
 from backtest import run_backtest, compute_all_metrics, get_split_dates
@@ -267,11 +274,11 @@ with tab_corr:
         else:
             c1, c2 = st.columns(2)
             with c1:
-                rc_default_a = "ARM" if "ARM" in selected else selected[0]
+                rc_default_a = "JPM" if "JPM" in selected else selected[0]
                 rc_sym1 = st.selectbox("Ticker 1", selected, index=selected.index(rc_default_a), key="rc_sym1")
             with c2:
                 other = [t for t in selected if t != rc_sym1]
-                rc_default_b = "TSM" if "TSM" in other else other[0]
+                rc_default_b = "BAC" if "BAC" in other else other[0]
                 rc_sym2 = st.selectbox("Ticker 2", other or selected, index=(other or selected).index(rc_default_b) if rc_default_b in (other or selected) else 0, key="rc_sym2")
             # Always pin to today so the chart stays current regardless of sidebar date range
             window_days = 90
@@ -394,8 +401,8 @@ with tab_coint:
     )
 
     db_tickers_coint = _tickers()
-    default_a = "ARM" if "ARM" in db_tickers_coint else db_tickers_coint[0]
-    default_b = "TSM" if "TSM" in db_tickers_coint else db_tickers_coint[1]
+    default_a = "JPM" if "JPM" in db_tickers_coint else db_tickers_coint[0]
+    default_b = "BAC" if "BAC" in db_tickers_coint else db_tickers_coint[1]
 
     ca1, ca2 = st.columns(2)
     with ca1:
@@ -590,21 +597,55 @@ with tab_coint:
             st.markdown("---")
             st.subheader("Final Verdict")
             st.caption(
-                "PASS requires both the 5yr and 2yr primary EG tests to show cointegration (p < 0.05). "
+                "**Path 1 (standard):** 5yr and 2yr primary EG tests both pass (p < 0.05) "
+                "AND both primaries run in the same regression direction. "
+                "Passing in opposite directions (e.g. 5yr: A→B, 2yr: B→A) disqualifies the pair. "
+                "**Path 2 (post-break):** Post-break EG re-test passes (either direction) "
+                "AND the ZA-detected structural break date was more than 2 years ago. "
                 f"Quarterly reference: {cr['quarters_passing']}/4 quarters showed cointegration (display only)."
             )
-            vc1, vc2 = st.columns(2)
+            vc1, vc2, vc3 = st.columns(3)
             with vc1:
                 if cr["eg_5yr_passes"]:
-                    st.success(f"✓ 5-Year EG: Cointegrated  (p={cr['eg']['p_value']:.4f})")
+                    st.success(
+                        f"✓ 5yr EG: Cointegrated  (p={cr['eg']['p_value']:.4f})\n\n"
+                        f"Direction: {cr['eg_direction']}"
+                    )
                 else:
-                    st.error(f"✗ 5-Year EG: Not cointegrated  (p={cr['eg']['p_value']:.4f})")
+                    st.error(
+                        f"✗ 5yr EG: Not cointegrated  (p={cr['eg']['p_value']:.4f})\n\n"
+                        f"Direction: {cr['eg_direction']}"
+                    )
             with vc2:
                 if cr["eg_2yr_passes"]:
-                    st.success(f"✓ 2-Year EG: Cointegrated  (p={cr['eg_2yr']['p_value']:.4f})")
+                    st.success(
+                        f"✓ 2yr EG: Cointegrated  (p={cr['eg_2yr']['p_value']:.4f})\n\n"
+                        f"Direction: {cr['eg_direction_2yr']}"
+                    )
                 else:
-                    st.error(f"✗ 2-Year EG: Not cointegrated  (p={cr['eg_2yr']['p_value']:.4f})")
-            pair_conc = pair_conclusion(cr["pair_passes"])
+                    st.error(
+                        f"✗ 2yr EG: Not cointegrated  (p={cr['eg_2yr']['p_value']:.4f})\n\n"
+                        f"Direction: {cr['eg_direction_2yr']}"
+                    )
+            with vc3:
+                if cr["eg_5yr_passes"] and cr["eg_2yr_passes"]:
+                    if cr["direction_match"]:
+                        st.success(f"✓ Same direction: {cr['eg_direction']}")
+                    else:
+                        st.error(
+                            f"✗ Direction mismatch\n\n"
+                            f"5yr: {cr['eg_direction']}  |  2yr: {cr['eg_direction_2yr']}"
+                        )
+                else:
+                    st.info("Direction check N/A (EG test(s) failed)")
+            pair_conc = pair_conclusion(
+                cr["pair_passes"],
+                path1_passes=cr["path1_passes"],
+                path2_passes=cr["path2_passes"],
+                direction_match=cr["direction_match"],
+                eg_5yr_passes=cr["eg_5yr_passes"],
+                eg_2yr_passes=cr["eg_2yr_passes"],
+            )
             if cr["pair_passes"]:
                 st.success(f"✓ {pair_conc}")
             else:
@@ -813,11 +854,20 @@ with tab_coint:
                     _render_pb_direction(pb["reverse"], pb["reverse_direction"], is_primary=False)
 
                     if pb["primary"]["is_cointegrated"] or pb["reverse"]["is_cointegrated"]:
-                        st.success(
-                            "At least one direction is cointegrated post-break — the structural break "
-                            "was event-driven and the long-run relationship has resumed. "
-                            "This pair may be viable for trading in the current regime."
-                        )
+                        if cr["post_break_over_2yr"]:
+                            st.success(
+                                "At least one direction is cointegrated post-break AND the ZA break "
+                                "date was more than 2 years ago — **qualifies for Path 2 PASS**. "
+                                "The long-run relationship has resumed with sufficient time in the "
+                                "new regime."
+                            )
+                        else:
+                            st.warning(
+                                "At least one direction is cointegrated post-break, but the ZA break "
+                                "date was fewer than 2 years ago — **does not yet qualify for Path 2 PASS**. "
+                                "The new regime needs more than 2 years of history before the "
+                                "post-break result is trusted."
+                            )
                     else:
                         st.error(
                             "Neither direction is cointegrated post-break — the break appears to be "
@@ -830,19 +880,19 @@ with tab_coint:
 
 # ─── Tab 4: Trading Signals ───────────────────────────────────────────────────
 with tab_signals:
-    st.header("Trading Signals — Quarterly β Pairs Strategy")
+    st.header("Trading Signals — Cointegration-Grounded Pairs Strategy")
     st.caption(
-        "Quarterly-fixed hedge ratio strategy: β is estimated from a trailing 1-year OLS "
-        "and refreshed at each calendar-quarter boundary — fixed for the full quarter. "
-        "Z-score uses a 60–120 day rolling mean/std. "
-        "Best applied to pairs that pass the Cointegration Test. "
+        "Signals are generated from the cointegration-validated α and β for the selected pair. "
+        "Parameters are refreshed monthly (rolling 2yr OLS for Path 1; growing post-break window for Path 2). "
+        "Trading stops if the monthly cointegration re-check fails. "
+        "Kill switches: cointegration failure · half-life breach · β-drift > 20% · volatility spike (R ≥ 1.8). "
         "Signals: z < −2 → LONG spread, z > 2 → SHORT spread, |z| < 0.5 → EXIT."
     )
 
     ts_tickers = _tickers()
-    ts_default_a = "ARM" if "ARM" in ts_tickers else ts_tickers[0]
+    ts_default_a = "JPM" if "JPM" in ts_tickers else ts_tickers[0]
     ts_others = [t for t in ts_tickers if t != ts_default_a]
-    ts_default_b = "TSM" if "TSM" in ts_others else ts_others[0]
+    ts_default_b = "BAC" if "BAC" in ts_others else ts_others[0]
 
     tsc1, tsc2, tsc3 = st.columns([2, 2, 1])
     with tsc1:
@@ -854,57 +904,162 @@ with tab_signals:
                                 key="ts_b")
     with tsc3:
         ts_window = st.number_input("Z-score window (days)", min_value=60, max_value=120, value=90, step=10,
-                                    help="Rolling window for z-score mean/std (60–120 days). β is always estimated from a trailing 1-year OLS, fixed per calendar quarter.",
+                                    help="Rolling window for z-score mean/std (60–120 days).",
                                     key="ts_win")
+
+    # ── Cointegration status for this pair ────────────────────────────────────
+    _coint_key = f"coint_result_{ts_sym_a}_{ts_sym_b}"
+    _cr_ts = st.session_state.get(_coint_key)
+
+    if _cr_ts is not None and _cr_ts.get("pair_passes"):
+        if _cr_ts.get("path1_passes"):
+            _ts_path_label = "Path 1 (5yr + 2yr same direction)"
+            _ts_pass_color = "success"
+        else:
+            _ts_path_label = "Path 2 (post-break, ZA break > 2yr ago)"
+            _ts_pass_color = "success"
+        st.success(f"Cointegration: **PASS — {_ts_path_label}**  ·  parameters sourced from cointegration result.")
+    elif _cr_ts is not None:
+        st.warning("Cointegration result found but pair did not pass. Using 2yr OLS fallback parameters.")
+        _ts_path_label = "Fallback (2yr OLS)"
+        _ts_pass_color = "warning"
+    else:
+        st.info(
+            f"No cointegration result cached for {ts_sym_a}/{ts_sym_b}. "
+            "Run the Cointegration Test tab first for validated parameters. "
+            "Using 2yr OLS fallback in the meantime."
+        )
+        _ts_path_label = "Fallback (2yr OLS)"
+        _ts_pass_color = "info"
 
     ts_run = st.button("Compute Signals", type="primary", key="ts_run")
 
     if ts_run:
-        with st.spinner(f"Computing rolling signals for {ts_sym_a} / {ts_sym_b}…"):
+        with st.spinner(f"Computing signals for {ts_sym_a} / {ts_sym_b}…"):
             try:
                 ts_pa, ts_pb = ts_fetch_prices(ts_sym_a, ts_sym_b)
-                ts_df = compute_rolling_signals(ts_pa, ts_pb, window=int(ts_window))
+                cr_ts = st.session_state.get(f"coint_result_{ts_sym_a}_{ts_sym_b}")
+
+                if cr_ts is not None and cr_ts.get("pair_passes"):
+                    if cr_ts.get("path1_passes"):
+                        # Path 1: α/β from 2yr EG result
+                        _direction = cr_ts["eg_direction_2yr"]
+                        dep, indep = _direction.split("→")
+                        sy_ts = ts_pa if dep == ts_sym_a else ts_pb
+                        sx_ts = ts_pa if indep == ts_sym_a else ts_pb
+                        alpha_ts = cr_ts["eg_2yr"]["alpha"]
+                        beta_ts  = cr_ts["eg_2yr"]["beta"]
+                        # Trailing 2yr from the last date in the series
+                        est_start_ts = ts_pa.index[-1] - pd.Timedelta(days=730)
+                        ts_path = "path1"
+                        coint_dir_ts = "AB" if dep == ts_sym_a else "BA"
+                    else:
+                        # Path 2: α/β from post-break primary
+                        pb_cr = cr_ts["eg_post_break"]
+                        _direction = pb_cr["primary_direction"]
+                        dep, indep = _direction.split("→")
+                        sy_ts = ts_pa if dep == ts_sym_a else ts_pb
+                        sx_ts = ts_pa if indep == ts_sym_a else ts_pb
+                        alpha_ts = pb_cr["primary"]["alpha"]
+                        beta_ts  = pb_cr["primary"]["beta"]
+                        est_start_ts = pd.Timestamp(cr_ts["structural_break"]["break_date"])
+                        ts_path = "path2"
+                        coint_dir_ts = "AB" if dep == ts_sym_a else "BA"
+                        dep, indep = _direction.split("→")
+                else:
+                    # Fallback: 2yr OLS on log prices, pick A→B direction
+                    _n2yr = min(504, len(ts_pa))
+                    _la = np.log(ts_pa.iloc[-_n2yr:].values.astype(float))
+                    _lb = np.log(ts_pb.iloc[-_n2yr:].values.astype(float))
+                    from statsmodels.tools import add_constant as _ac
+                    from statsmodels.regression.linear_model import OLS as _OLS
+                    _m = _OLS(_la, _ac(_lb)).fit()
+                    alpha_ts = float(_m.params[0])
+                    beta_ts  = float(_m.params[1])
+                    sy_ts, sx_ts = ts_pa, ts_pb
+                    dep, indep = ts_sym_a, ts_sym_b
+                    est_start_ts = ts_pa.iloc[-_n2yr:].index[0]
+                    ts_path = "path1"
+                    coint_dir_ts = "AB"
+
+                ts_df = generate_signals(
+                    sy_ts, sx_ts, alpha_ts, beta_ts,
+                    est_start_ts, path=ts_path,
+                    coint_direction=coint_dir_ts,
+                    window=int(ts_window),
+                )
                 st.session_state["ts_df"] = ts_df
-                st.session_state["ts_sym_a"] = ts_sym_a
-                st.session_state["ts_sym_b"] = ts_sym_b
+                st.session_state["ts_sym_y"] = dep
+                st.session_state["ts_sym_x"] = indep
+                st.session_state["ts_path_label"] = _ts_path_label
             except Exception as exc:
                 st.error(f"Computation failed: {exc}")
                 st.session_state.pop("ts_df", None)
 
     if "ts_df" in st.session_state:
         ts_df = st.session_state["ts_df"]
-        sym_a_lbl = st.session_state["ts_sym_a"]
-        sym_b_lbl = st.session_state["ts_sym_b"]
+        sym_y_lbl = st.session_state.get("ts_sym_y", ts_sym_a)
+        sym_x_lbl = st.session_state.get("ts_sym_x", ts_sym_b)
+        path_lbl  = st.session_state.get("ts_path_label", "—")
         valid = ts_df.dropna(subset=["z_score"])
 
         st.markdown("---")
 
-        # ── Current signal ─────────────────────────────────────────────────
+        # ── Volatility regime panel ────────────────────────────────────────────
         latest = valid.iloc[-1]
-        cur_sig = latest["signal"]
-        cur_z = latest["z_score"]
-        cur_beta = latest["beta"]
-        translation = signal_translation(latest, sym_a_lbl, sym_b_lbl)
+        cur_vol_ratio  = latest["vol_ratio"]
+        cur_vol_regime = latest["vol_regime"]
+        cur_kill       = bool(latest["kill_switch"])
+        cur_ks_reasons = []
+        if latest["kill_coint"]:  cur_ks_reasons.append("Cointegration failed")
+        if latest["kill_hl"]:     cur_ks_reasons.append("Half-life breach")
+        if latest["kill_beta"]:   cur_ks_reasons.append("β-drift > 20%")
+        if latest["kill_vol"]:    cur_ks_reasons.append("Volatility kill")
 
-        sig_color = {"LONG": "green", "SHORT": "red", "EXIT": "orange", "HOLD": "blue"}.get(cur_sig, "gray")
-        st.subheader("Current Signal")
-        cs1, cs2, cs3, cs4 = st.columns(4)
-        cs1.metric("Signal", cur_sig)
-        cs2.metric("Z-Score", f"{cur_z:.3f}")
-        cs3.metric(f"β ({sym_a_lbl}/{sym_b_lbl})", f"{cur_beta:.4f}")
-        cs4.metric("Position A", f"{latest['position_a']:+.0f} unit")
-        st.markdown(f"**Trade:** :{sig_color}[{translation}]")
-        cur_quarter = latest["quarter"] if "quarter" in latest.index else "—"
-        st.caption(f"Quarter: {cur_quarter}  |  β is fixed for this quarter (estimated from trailing 1-year OLS).  "
-                   f"Position B = {abs(latest['position_b']):.4f} units of {sym_b_lbl}  "
-                   f"(position_B = β_q × |position_A|)")
+        vr1, vr2, vr3, vr4 = st.columns(4)
+        vr1.metric("Vol Ratio (R)", f"{cur_vol_ratio:.3f}" if not np.isnan(cur_vol_ratio) else "N/A")
+        vr2.metric("Vol Regime", cur_vol_regime)
+        vr3.metric("Kill Switch", "ACTIVE" if cur_kill else "Off")
+        vr4.metric("Path", path_lbl.split(" ")[0] if path_lbl else "—")
+
+        if cur_kill:
+            st.error(f"Kill switch ACTIVE: {', '.join(cur_ks_reasons) if cur_ks_reasons else 'active'}")
+        elif cur_vol_regime == "Elevated":
+            st.warning("Volatility elevated (R 1.3–1.8) — positions sized at 50%.")
+        else:
+            st.success(f"All kill switches off. Regime: {cur_vol_regime}.")
 
         st.markdown("---")
 
-        # ── Z-score chart ───────────────────────────────────────────────────
+        # ── Current signal panel ───────────────────────────────────────────────
+        cur_sig   = latest["signal"]
+        cur_z     = latest["z_score"]
+        cur_alpha = latest["alpha"]
+        cur_beta  = latest["beta"]
+        cur_hl    = latest["half_life"]
+        translation = signal_translation(latest, sym_y_lbl, sym_x_lbl)
+        sig_color = {"LONG": "green", "SHORT": "red", "EXIT": "orange", "HOLD": "blue"}.get(cur_sig, "gray")
+
+        st.subheader("Current Signal")
+        cs1, cs2, cs3, cs4, cs5 = st.columns(5)
+        cs1.metric("Signal", cur_sig)
+        cs2.metric("Z-Score", f"{cur_z:.3f}")
+        cs3.metric(f"β ({sym_y_lbl}/{sym_x_lbl})", f"{cur_beta:.4f}")
+        cs4.metric("Half-Life (days)", f"{cur_hl:.1f}" if not np.isnan(cur_hl) else "N/A")
+        cs5.metric(f"Position {sym_y_lbl}", f"{latest['position_y']:+.2f}")
+        st.markdown(f"**Trade:** :{sig_color}[{translation}]")
+        st.caption(
+            f"spread = log({sym_y_lbl}) − (α + β·log({sym_x_lbl}))  "
+            f"α={cur_alpha:.4f}  β={cur_beta:.4f}  "
+            f"Position {sym_x_lbl} = {latest['position_x']:+.4f} units  "
+            f"(= −β × position_{sym_y_lbl})"
+        )
+
+        st.markdown("---")
+
+        # ── Z-score chart ──────────────────────────────────────────────────────
         st.subheader("Z-Score & Signals")
         sig_colors_map = {"LONG": "#1565C0", "SHORT": "#B71C1C", "EXIT": "#E65100", "HOLD": "#616161"}
-        point_colors = valid["signal"].map(sig_colors_map).fillna("#616161")
 
         fig_z = go.Figure()
         fig_z.add_trace(go.Scatter(
@@ -912,7 +1067,6 @@ with tab_signals:
             mode="lines", name="Z-Score",
             line=dict(color="#78909C", width=1.2),
         ))
-        # Overlay colored markers by signal
         for sig, color in sig_colors_map.items():
             mask = valid["signal"] == sig
             if mask.any():
@@ -921,6 +1075,14 @@ with tab_signals:
                     mode="markers", name=sig,
                     marker=dict(color=color, size=4),
                 ))
+        # shade kill-switch periods
+        ks_mask = valid["kill_switch"].astype(bool)
+        if ks_mask.any():
+            fig_z.add_trace(go.Scatter(
+                x=valid.index[ks_mask], y=valid["z_score"][ks_mask],
+                mode="markers", name="Kill Switch",
+                marker=dict(color="#FF6F00", size=5, symbol="x"),
+            ))
         for level, label, dash in [(2, "+2 (SHORT)", "dash"), (-2, "−2 (LONG)", "dash"),
                                     (0.5, "+0.5 (EXIT)", "dot"), (-0.5, "−0.5 (EXIT)", "dot")]:
             fig_z.add_hline(y=level, line=dict(color="#aaa", dash=dash, width=1),
@@ -929,48 +1091,104 @@ with tab_signals:
                             legend=dict(orientation="h", y=-0.15))
         st.plotly_chart(fig_z, use_container_width=True)
 
-        # ── Quarterly β chart ────────────────────────────────────────────────
-        st.subheader("Quarterly Fixed Hedge Ratio β")
-        st.caption("β is estimated once per calendar quarter from a trailing 1-year OLS — "
-                   "the step-function shape shows each quarterly update.")
+        # ── β chart with 20% drift bands ──────────────────────────────────────
+        st.subheader("Hedge Ratio β — Monthly Re-estimated")
+        st.caption(
+            "β is re-estimated monthly from the extended cointegration window and held fixed within each month. "
+            "The rolling 252d OLS β (grey) is shown for reference only. "
+            "The orange bands mark ±20% drift from the initial β at the time of the cointegration pass — "
+            "a breach of these bands triggers the β-drift kill switch."
+        )
+        beta_valid = valid.dropna(subset=["beta"])
         fig_b = go.Figure()
         fig_b.add_trace(go.Scatter(
-            x=valid.index, y=valid["beta"],
-            mode="lines", name="β (quarterly fixed)",
+            x=beta_valid.index, y=beta_valid["beta"],
+            mode="lines", name="Trading β (monthly)",
             line=dict(color="#7B1FA2", width=2, shape="hv"),
         ))
+        if "roll_beta" in beta_valid.columns:
+            rb_plot = beta_valid["roll_beta"].dropna()
+            if len(rb_plot) > 0:
+                fig_b.add_trace(go.Scatter(
+                    x=rb_plot.index, y=rb_plot.values,
+                    mode="lines", name="Rolling 252d β",
+                    line=dict(color="#78909C", width=1, dash="dot"),
+                ))
+        # ±20% bands around beta_init (β at cointegration pass) — this is what the
+        # kill switch compares against, not the current monthly β
+        _beta_init_ref = beta_valid["beta"].iloc[0]  # first value = alpha_init/beta_init
+        upper_band = pd.Series(_beta_init_ref * 1.20, index=beta_valid.index)
+        lower_band = pd.Series(_beta_init_ref * 0.80, index=beta_valid.index)
+        fig_b.add_trace(go.Scatter(
+            x=beta_valid.index, y=upper_band,
+            mode="lines", name="+20% band",
+            line=dict(color="#FF8F00", dash="dot", width=1),
+        ))
+        fig_b.add_trace(go.Scatter(
+            x=beta_valid.index, y=lower_band,
+            mode="lines", name="−20% band",
+            line=dict(color="#FF8F00", dash="dot", width=1),
+            fill="tonexty", fillcolor="rgba(255,143,0,0.06)",
+        ))
         fig_b.add_hline(y=0, line=dict(color="#aaa", dash="dot", width=1))
-        fig_b.update_layout(height=260, margin=dict(t=10), yaxis_title="β",
+        fig_b.update_layout(height=280, margin=dict(t=10), yaxis_title="β",
                             hovermode="x unified")
         st.plotly_chart(fig_b, use_container_width=True)
 
-        # ── Recent signals table ────────────────────────────────────────────
+        # ── Volatility regime chart ────────────────────────────────────────────
+        st.subheader("Volatility Regime (R = σ₂₀ / σ₁₀₀)")
+        st.caption("R < 1.3 = Normal · 1.3–1.8 = Elevated (half size) · ≥ 1.8 = Kill Switch")
+        vr_valid = valid["vol_ratio"].dropna()
+        fig_vr = go.Figure()
+        fig_vr.add_trace(go.Scatter(
+            x=vr_valid.index, y=vr_valid.values,
+            mode="lines", name="R (vol ratio)",
+            line=dict(color="#0288D1", width=1.5),
+        ))
+        fig_vr.add_hline(y=1.3, line=dict(color="#FFA000", dash="dash", width=1),
+                         annotation_text="1.3 (Elevated)", annotation_position="right")
+        fig_vr.add_hline(y=1.8, line=dict(color="#D32F2F", dash="dash", width=1),
+                         annotation_text="1.8 (Kill Switch)", annotation_position="right")
+        fig_vr.update_layout(height=240, margin=dict(t=10), yaxis_title="R",
+                             hovermode="x unified")
+        st.plotly_chart(fig_vr, use_container_width=True)
+
+        # ── Recent signal log ──────────────────────────────────────────────────
         st.subheader("Recent Signal Log")
         recent = valid.tail(30).copy()
-        recent["translation"] = recent.apply(lambda r: signal_translation(r, sym_a_lbl, sym_b_lbl), axis=1)
-        display_cols = ["quarter", "z_score", "signal", "beta", "position_a", "position_b", "translation"]
+        recent["trade"] = recent.apply(lambda r: signal_translation(r, sym_y_lbl, sym_x_lbl), axis=1)
+        log_cols = ["z_score", "signal", "beta", "half_life", "vol_regime",
+                    "kill_switch", "position_y", "position_x", "trade"]
         st.dataframe(
-            recent[display_cols].rename(columns={
-                "quarter": "Quarter", "z_score": "Z-Score", "signal": "Signal", "beta": "β (fixed)",
-                "position_a": f"Pos {sym_a_lbl}", "position_b": f"Pos {sym_b_lbl}",
-                "translation": "Trade Instruction",
+            recent[log_cols].rename(columns={
+                "z_score":    "Z-Score",
+                "signal":     "Signal",
+                "beta":       "β",
+                "half_life":  "Half-Life",
+                "vol_regime": "Vol Regime",
+                "kill_switch":"Kill Switch",
+                "position_y": f"Pos {sym_y_lbl}",
+                "position_x": f"Pos {sym_x_lbl}",
+                "trade":      "Trade Instruction",
             }).iloc[::-1],
             use_container_width=True, hide_index=False,
         )
 
         st.markdown("---")
 
-        # ── Hypothetical PnL — Full 5-Year History ───────────────────────────
-        st.subheader("Hypothetical PnL — Full 5-Year History")
+        # ── PnL section ────────────────────────────────────────────────────────
+        st.subheader("Hypothetical PnL")
         st.caption(
-            "Simulated gains from following these signals over the full 5-year price history. "
-            "Position sizing: ±1 unit of Stock A + β-weighted hedge in Stock B."
+            "Simulated gains over the full trading period. "
+            "Position sizing: ±1 unit of Y + β-weighted hedge in X. "
+            "Halved during Elevated vol regime; zeroed when any kill switch fires."
         )
         pnl_valid = ts_df.dropna(subset=["pnl"])
 
         total_pnl = pnl_valid["pnl"].sum()
-        trading_days = (pnl_valid["position_a"].shift(1) != 0).sum()
-        active_pnl = pnl_valid.loc[pnl_valid["position_a"].shift(1) != 0, "pnl"]
+        active_mask_ts = pnl_valid["position_y"].shift(1).fillna(0) != 0
+        trading_days = active_mask_ts.sum()
+        active_pnl = pnl_valid.loc[active_mask_ts, "pnl"]
         win_rate_pnl = (active_pnl > 0).mean() * 100 if len(active_pnl) > 0 else 0
         daily_ret = pnl_valid["pnl"]
         sharpe_pnl = (daily_ret.mean() / daily_ret.std() * np.sqrt(252)) if daily_ret.std() > 0 else 0
@@ -997,11 +1215,11 @@ with tab_signals:
                               yaxis_title="PnL ($)", hovermode="x unified")
         st.plotly_chart(fig_cum, use_container_width=True)
 
-        bar_colors = np.where(pnl_valid["pnl"] >= 0, "#388E3C", "#D32F2F")
+        bar_colors_ts = np.where(pnl_valid["pnl"] >= 0, "#388E3C", "#D32F2F")
         fig_daily = go.Figure()
         fig_daily.add_trace(go.Bar(
             x=pnl_valid.index, y=pnl_valid["pnl"],
-            marker_color=bar_colors, name="Daily PnL",
+            marker_color=bar_colors_ts, name="Daily PnL",
         ))
         fig_daily.add_hline(y=0, line=dict(color="#aaa", width=1))
         fig_daily.update_layout(title="Daily PnL", height=300, margin=dict(t=40),
@@ -1031,9 +1249,9 @@ with tab_test:
     )
 
     bt_tickers = _tickers()
-    bt_default_a = "ARM" if "ARM" in bt_tickers else bt_tickers[0]
+    bt_default_a = "JPM" if "JPM" in bt_tickers else bt_tickers[0]
     bt_others = [t for t in bt_tickers if t != bt_default_a]
-    bt_default_b = "TSM" if "TSM" in bt_others else bt_others[0]
+    bt_default_b = "BAC" if "BAC" in bt_others else bt_others[0]
 
     btc1, btc2, btc3 = st.columns([2, 2, 1])
     with btc1:
@@ -1453,9 +1671,9 @@ with tab_fund:
     if not fund_tickers:
         st.warning("No tickers in DB. Add tickers via Manage Tickers first.")
     else:
-        _fd_default_a = "ARM" if "ARM" in fund_tickers else fund_tickers[0]
+        _fd_default_a = "JPM" if "JPM" in fund_tickers else fund_tickers[0]
         _fd_others    = [t for t in fund_tickers if t != _fd_default_a]
-        _fd_default_b = "TSM" if "TSM" in _fd_others else (_fd_others[0] if _fd_others else fund_tickers[0])
+        _fd_default_b = "BAC" if "BAC" in _fd_others else (_fd_others[0] if _fd_others else fund_tickers[0])
 
         fd_c1, fd_c2, fd_c3 = st.columns([2, 2, 1])
         with fd_c1:

@@ -275,7 +275,15 @@ def run_all(sym_a: str, sym_b: str) -> dict:
       - 2yr: OLS on 2yr data — compared against 5yr to detect structural drift
       - quarterly: OLS on each ~63-day window — display only, not used in verdict
 
-    Verdict: PASS iff 5yr primary p < 0.05 AND 2yr primary p < 0.05.
+    Verdict — a pair PASSES under either of two paths:
+
+    Path 1 (standard): 5yr primary p < 0.05 AND 2yr primary p < 0.05 AND both primary
+        regressions run in the same direction (e.g. both A→B). A pair whose 5yr test passes
+        A→B while its 2yr test passes B→A has inconsistent directionality and does NOT pass.
+
+    Path 2 (post-break): The post-break EG re-test passes (at least one direction p < 0.05)
+        AND the ZA-detected structural break date is more than 2 years before today. This
+        requires sufficient time in the new regime to have elapsed before trusting the result.
     """
     # ── 5yr: I(1) check + EG (α and β from 5yr OLS) ─────────────────────────
     series_a_5yr, series_b_5yr = fetch_prices(sym_a, sym_b, days=365 * 5)
@@ -315,7 +323,8 @@ def run_all(sym_a: str, sym_b: str) -> dict:
         eg_rev_direction_2yr = f"{sym_a}→{sym_b}"
 
     eg_2yr_passes = eg_primary_2yr["is_cointegrated"]
-    pair_passes = eg_5yr_passes and eg_2yr_passes
+    direction_match = eg_direction == eg_direction_2yr
+    path1_passes = eg_5yr_passes and eg_2yr_passes and direction_match
 
     # ── 1yr quarterly: fresh OLS per quarter — display only ──────────────────
     series_a_1yr, series_b_1yr = fetch_prices(sym_a, sym_b, days=365)
@@ -368,6 +377,20 @@ def run_all(sym_a: str, sym_b: str) -> dict:
             series_a_5yr, series_b_5yr, post_break_start_date, sym_a, sym_b
         )
 
+    # ── Path 2: post-break pass AND ZA break date > 2 years ago ──────────────
+    post_break_passes = False
+    post_break_over_2yr = False
+    if eg_post_break is not None and sb is not None:
+        post_break_passes = (
+            eg_post_break["primary"]["is_cointegrated"]
+            or eg_post_break["reverse"]["is_cointegrated"]
+        )
+        days_since_break = (date.today() - sb["break_date"].date()).days
+        post_break_over_2yr = days_since_break > 730
+
+    path2_passes = post_break_passes and post_break_over_2yr
+    pair_passes = path1_passes or path2_passes
+
     return {
         "sym_a": sym_a,
         "sym_b": sym_b,
@@ -391,6 +414,11 @@ def run_all(sym_a: str, sym_b: str) -> dict:
         "eg_reverse_direction_2yr": eg_rev_direction_2yr,
         "eg_2yr_passes": eg_2yr_passes,
         # Overall verdict
+        "direction_match": direction_match,
+        "path1_passes": path1_passes,
+        "post_break_passes": post_break_passes,
+        "post_break_over_2yr": post_break_over_2yr,
+        "path2_passes": path2_passes,
         "pair_passes": pair_passes,
         # Quarterly (display only, fresh per-quarter OLS)
         "quarters": quarters,
@@ -435,7 +463,11 @@ if __name__ == "__main__":
     print(f"  {sym_a}→{sym_b}:  5yr β={ab5['beta']:.4f}  2yr β={ab2['beta']:.4f}  Δ={ab2['beta']-ab5['beta']:+.4f}")
     print(f"  {sym_b}→{sym_a}:  5yr β={ba5['beta']:.4f}  2yr β={ba2['beta']:.4f}  Δ={ba2['beta']-ba5['beta']:+.4f}")
 
-    print(f"\nPair PASS (5yr AND 2yr both p<0.05): {results['pair_passes']}")
+    print(f"\nDirection match (5yr primary == 2yr primary): {results['direction_match']}")
+    print(f"Path 1 PASS (5yr p<0.05 AND 2yr p<0.05 AND same direction): {results['path1_passes']}")
+    print(f"Post-break passes: {results['post_break_passes']}  |  Break > 2yr ago: {results['post_break_over_2yr']}")
+    print(f"Path 2 PASS (post-break pass AND break > 2yr ago): {results['path2_passes']}")
+    print(f"Overall PASS (Path 1 OR Path 2): {results['pair_passes']}")
 
     print(f"\nQuarterly (fresh per-quarter OLS, display only):")
     for q in results["quarters"]:

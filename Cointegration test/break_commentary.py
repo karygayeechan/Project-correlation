@@ -1,11 +1,30 @@
 import os
+import time
 import xml.etree.ElementTree as ET
 
 import requests
-from anthropic import Anthropic
+from anthropic import Anthropic, APIStatusError
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_TOOL_DEF = {
+    "name": "web_search",
+    "description": (
+        "Search Google News for recent articles about financial events, "
+        "stock performance, earnings, and macroeconomic conditions."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The Google News search query string.",
+            }
+        },
+        "required": ["query"],
+    },
+}
 
 
 def _search_google_news(query: str, max_results: int = 6) -> str:
@@ -20,7 +39,6 @@ def _search_google_news(query: str, max_results: int = 6) -> str:
         items = []
         for item in root.findall(".//item"):
             raw_title = item.findtext("title", "")
-            # Google News appends " - Source Name" to titles
             if " - " in raw_title:
                 title, source_guess = raw_title.rsplit(" - ", 1)
             else:
@@ -41,6 +59,29 @@ def _search_google_news(query: str, max_results: int = 6) -> str:
         return f"Search failed: {exc}"
 
 
+_MODEL_FALLBACKS = ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+
+
+def _api_call_with_retry(client, **kwargs):
+    """Try each model fallback with exponential backoff on 500/529 errors."""
+    models = _MODEL_FALLBACKS[:]
+    while models:
+        model = models.pop(0)
+        delays = [3, 8, 20]
+        for delay in delays + [None]:
+            try:
+                return client.messages.create(**kwargs, model=model)
+            except APIStatusError as e:
+                if e.status_code in (500, 529):
+                    if delay is not None:
+                        time.sleep(delay)
+                        continue
+                    # exhausted retries for this model — try next
+                    break
+                raise
+    raise RuntimeError("All models unavailable after retries.")
+
+
 def generate_break_commentary(
     sym_a: str,
     sym_b: str,
@@ -49,12 +90,7 @@ def generate_break_commentary(
     break_days: int,
     za_break_date=None,
 ) -> str:
-    """Generate ~200-word break period commentary grounded strictly in web search results.
-
-    Uses Anthropic web_search tool (server-side) with Google News RSS as the client-side
-    fallback execution. Claude is prohibited from using background knowledge — every claim
-    must cite a specific article returned by the search.
-    """
+    """Generate ~200-word break period commentary grounded strictly in web search results."""
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     start_str = break_start.strftime("%B %Y")
@@ -90,15 +126,14 @@ def generate_break_commentary(
     messages = [{"role": "user", "content": user}]
 
     for _ in range(10):  # max search iterations
-        response = client.messages.create(
-            model="claude-opus-4-7",
+        response = _api_call_with_retry(
+            client,
             max_tokens=700,
             system=system,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            tools=[_TOOL_DEF],
             messages=messages,
         )
 
-        # Collect any text blocks in this turn
         text_blocks = [
             b.text for b in response.content
             if hasattr(b, "text") and b.type == "text"
@@ -121,7 +156,6 @@ def generate_break_commentary(
                 })
 
         if not tool_results:
-            # No tool use found but stop_reason wasn't end_turn — return what we have
             return "\n".join(text_blocks).strip() or "Commentary could not be generated."
 
         messages.append({"role": "user", "content": tool_results})

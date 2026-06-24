@@ -10,7 +10,9 @@ and structural break analysis. All computations use log(price); regression versi
 | **2-year** | 365 × 2 cal days | Fresh on 2yr data | EG confirmation (verdict); β comparison vs 5yr |
 | **1-year** | 365 cal days | Fresh per ~63-day quarter | Quarterly display only (not verdict) |
 
-Verdict: **PASS iff 5yr primary p < 0.05 AND 2yr primary p < 0.05.**
+Verdict: **PASS under Path 1 or Path 2.**
+- **Path 1 (standard):** 5yr primary p < 0.05 AND 2yr primary p < 0.05 AND both primaries run in the same regression direction. Opposing directions (e.g. 5yr A→B, 2yr B→A) disqualify the pair.
+- **Path 2 (post-break):** Post-break EG re-test passes (either direction p < 0.05) AND ZA break date is > 2 years before today.
 
 ---
 
@@ -84,8 +86,9 @@ Returns dict with keys: `primary, reverse, primary_direction, reverse_direction,
 6. Primary = lower 2yr p → `eg_2yr`, `eg_direction_2yr`, etc.
 7. `eg_2yr_passes = primary_2yr["is_cointegrated"]`
 
-**Verdict:**
-8. `pair_passes = eg_5yr_passes and eg_2yr_passes`
+**Direction check + Path 1:**
+8. `direction_match = (eg_direction == eg_direction_2yr)`
+9. `path1_passes = eg_5yr_passes and eg_2yr_passes and direction_match`
 
 **Quarterly (display only):**
 9. Fetch 1yr; split into 4 equal windows (~63 obs)
@@ -103,12 +106,20 @@ Returns dict with keys: `primary, reverse, primary_direction, reverse_direction,
 17. If structural_break is not None: `run_eg_post_break(series_a_5yr, series_b_5yr, sb["break_date"], sym_a, sym_b)` → `eg_post_break`
     Start date = ZA break date (sharpest inflection point); both directions tested.
 
+**Path 2 + final verdict:**
+18. `post_break_passes = pb["primary"]["is_cointegrated"] or pb["reverse"]["is_cointegrated"]`
+19. `post_break_over_2yr = (date.today() - sb["break_date"].date()).days > 730`
+20. `path2_passes = post_break_passes and post_break_over_2yr`
+21. `pair_passes = path1_passes or path2_passes`
+
 **Return dict keys:**
 - `sym_a, sym_b, adf_a, adf_b`
 - `eg, eg_direction, eg_reverse, eg_reverse_direction, eg_5yr_passes`
 - `eg_ab_5yr, eg_ba_5yr` (for β comparison)
 - `eg_ab_2yr, eg_ba_2yr` (for β comparison)
 - `eg_2yr, eg_direction_2yr, eg_reverse_2yr, eg_reverse_direction_2yr, eg_2yr_passes`
+- `direction_match, path1_passes`
+- `post_break_passes, post_break_over_2yr, path2_passes`
 - `pair_passes`
 - `quarters` (list), `quarters_passing`
 - `rolling_beta, rolling_beta_direction, rolling_beta_window`
@@ -216,6 +227,11 @@ Rolling β chart (line + 5yr ref line + ±1σ bands) + 4 summary metrics.
 
 ## Key design decisions
 
+- **Two-path verdict**: Path 1 requires matching regression direction across 5yr and 2yr tests —
+  a pair that passes A→B over 5yr but B→A over 2yr has flipped its causal structure, which is
+  economically incoherent for pairs trading. Path 2 allows a PASS via post-break cointegration
+  if the new regime has been running for more than 2 years, providing enough history to trust
+  the post-break estimate.
 - **Version 4 regression throughout**: log-log with constant gives β an elasticity
   interpretation; constant absorbs price-level scale differences; autolag='AIC' for lags.
 - **Independent OLS per window**: each window estimates its own α, β. β comparison (5yr vs 2yr)

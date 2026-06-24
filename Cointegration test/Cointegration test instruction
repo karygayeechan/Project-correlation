@@ -76,10 +76,28 @@ Below cards: "X/4 quarters showed cointegration (reference only)."
 STEP 4 — OVERALL VERDICT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-PASS iff: 5yr primary p < 0.05  AND  2yr primary p < 0.05.
-Quarterly results do NOT determine the verdict.
+A pair PASSES under either of two paths. Quarterly results do NOT determine the verdict.
 
-Display: two-column (5yr ✓/✗ + p | 2yr ✓/✗ + p) → final PASS/FAIL banner.
+PATH 1 (standard):
+  5yr primary p < 0.05
+  AND 2yr primary p < 0.05
+  AND both primary regressions run in the SAME direction
+    (e.g. both A→B, or both B→A).
+
+  If 5yr passes A→B but 2yr passes B→A, the directions are inconsistent — the pair does
+  NOT pass Path 1. A genuine long-run relationship should remain in the same causal
+  direction across both windows.
+
+PATH 2 (post-break):
+  Post-break EG re-test passes (at least one direction p < 0.05 in Step 6)
+  AND the ZA-detected structural break date was more than 2 years before today.
+
+  The 2-year floor ensures sufficient history exists in the new regime to trust the
+  post-break estimate. If the break is less than 2 years old, the post-break window is
+  too short to confirm a durable new relationship.
+
+Display: three-column row (5yr ✓/✗ + direction | 2yr ✓/✗ + direction | direction match ✓/✗)
+→ final PASS/FAIL banner indicating which path was satisfied (or why it failed).
 Footnote: quarterly reference count.
 
 
@@ -153,9 +171,12 @@ Run full EG in BOTH directions on data from break_date → today:
   - Show α, β, ADF stat, p-value, crit 5%, N obs for each direction
   - Verdict: Cointegrated ✓ or ✗ per direction
 
-If either direction passes (p < 0.05):
-  "Pair is cointegrated in the post-break regime — structural break was event-driven."
-If both fail:
+If either direction passes (p < 0.05) AND ZA break date > 2 years ago:
+  "Qualifies for Path 2 PASS — post-break cointegration confirmed with sufficient history."
+If either direction passes but ZA break date ≤ 2 years ago:
+  "Post-break cointegration detected but the break is too recent — does not yet qualify
+   for Path 2 PASS. Re-check once the new regime has 2+ years of data."
+If both directions fail:
   "Break appears to be a permanent regime shift."
 
 Minimum 60 observations required; otherwise show "insufficient data" notice.

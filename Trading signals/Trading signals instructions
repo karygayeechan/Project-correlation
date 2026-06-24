@@ -1,26 +1,33 @@
-After a pair of stock has received positive recommendation from cointegration test (passes all criteria), perform below steps:
+Once a pair of stock has passed the cointegration test in either of these scenarios (refer to co-integration test instruction and cointegration test/PLAN.md): 
+1) passed both 5yr and 2yr co-integration test
+2) passed the co-integration test after the structural break and the period between ZA break day and today is more than 2 years.
+
+To generate trading signals for these two scenarios:
+1) passed both 5yr and 2yr co-integration test:
+ - identify the parameters: α and β that are used in the 2-year window, trade with this fixed α and β in the trading period and re-estimate the parameters on a monthly basis. If the co-integration test is still a pass after 1 month, use the latest parameters in the latest 2-year window (including the data in the latest month). If the co-integration test is no longer a pass, then stop trading/don't make new transactions.
+2) passed the co-integration test after the structural break and the period between ZA break day and today is more than 2 years:
+- identify the parameters: α and β that are used in the most recent period with a pass result (most likely ZA break day till today), trade with this fixed α and β in the trading period and re-estimate the parameters on a monthly basis. If the co-integration test is still a pass after 1 month, use the latest parameters in the latest post-break window (including the data in the latest month). If the co-integration test is no longer a pass, then stop trading/don't make new transactions.
+
+For both scenarios when refreshing parameters on a monthly basis, make sure not to use the parameters for that specific 1 month when you trade. Instead, you should include the latest 1-month data and add it to the latest period where it had a co-integration pass result (whether that being 2-year in scenario 1 or post break period till today in scenario 2, so e.g. for β it will be 1) past 1 year and 11 month + 1 month new data that forms the new β or 2) post break period till today + 1 month new data that forms the new β, untill the relationship breaks and co-integration no longer passes.
+
+After above parameters are identified for the trading period coming from these two scenarios, follow below steps:
 
 1. Choose a z-score rolling window of 60–120 days (default 90).
 
-2. Compute quarterly-fixed hedge ratio β:
-   - At each calendar-quarter boundary, run OLS regression using the trailing 1-year window
-     (252 trading days) of past data only (no look-ahead).
-   - The resulting α and β are fixed and held constant for the entire quarter.
-   - β is NOT updated daily — it changes only at the start of each new calendar quarter.
-
-3. Compute spread at each time t using the quarter's fixed α and β:
+2. Compute spread and half-life at each time t using the fixed α and β:
    spread_t = A_t − (α_q + β_q × B_t)
-   where α_q and β_q are the values estimated at the start of the current quarter q.
+  Calculate half-life using spread (instead of using either stock individually): ΔSpreadt​=c+θSpreadt−1​+ϵt​, freeze the half-life estimation for the next trading period. Enter a trade only if 3< half-life <40
 
-4. Convert spread into z-score using a rolling window (60–120 days):
+1. Convert spread into z-score using a rolling window (60–120 days):
    z_t = (spread_t − μ_t) / σ_t
    where μ_t and σ_t are the rolling mean and std of the spread over the chosen window.
 
-5. Generate trading signals:
+2. Generate trading signals:
    1) z < −2  → LONG spread
    2) z >  2  → SHORT spread
    3) |z| < 0.5 → EXIT the trade
    4) otherwise → HOLD
+
 
 6. Translate signals into actual positions:
    1) z < −2 (LONG spread):  buy A and sell β_q × B
@@ -34,3 +41,10 @@ After a pair of stock has received positive recommendation from cointegration te
 
 8. Build daily PnL:
    PnL_t = position_A_{t−1} × ΔA_t + position_B_{t−1} × ΔB_t
+
+9. Kill switch (hard stop)
+Disable pair (stock trading the pair, no new transactions) if:
+- cointegration test fails: p-value >0.05 in the direction of trading (Y=stock A, X= stock B)
+- Half-life doubles or half-life <3 or half-life > 40
+- monthly re-estimated β deviates more than 20% from the initial β at the time of the cointegration pass (beta_init). Do NOT compare against a β estimated over a single month's window — that is too noisy and does not measure relationship drift.
+- Volatility regime not OK (use this volatility filter: 1) compute 20-day EWMA volatility and 100-day rolling volatility, 2) compute ratio R_t = σ_20​/σ_100. Rules: R< 1.3 normal, 1.3-1.8 suggests halve position size, >1.8 = kill switch/stop trading. Show the volatility regime also on streamlit trading signal tab.
